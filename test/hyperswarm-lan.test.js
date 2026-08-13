@@ -48,35 +48,39 @@ class FakeSwarm extends EventEmitter {
   destroy () { return Promise.resolve() }
 }
 
-class FakeDiscovery extends EventEmitter {
-  start (record, onPeer) {
-    this.record = record
-    this.onPeer = onPeer
+class FakeAdapter {
+  browse (query, handlers) {
+    this.query = query
+    this.handlers = handlers
+    return { stop: () => { this.browserStopped = true } }
   }
 
-  update (record) { this.record = record }
-  stop () { return Promise.resolve() }
-  destroy () { return Promise.resolve() }
+  advertise (record) {
+    this.record = record
+    return { stop: () => { this.advertisementStopped = true } }
+  }
+
+  discover (service) { this.handlers.onService(service) }
 }
 
 test('adds a discovered endpoint and refreshes active topics', async () => {
   const dht = new FakeDHT()
   const keyPair = { publicKey: Buffer.alloc(32, 1) }
   const swarm = new FakeSwarm(dht, keyPair)
-  const discovery = new FakeDiscovery()
+  const adapter = new FakeAdapter()
   const lan = new HyperswarmLAN({
     host: '127.0.0.1',
     port: 49799,
     dht,
     swarm,
-    discovery,
+    adapter,
     eager: false
   })
 
   await lan.ready()
   const topic = Buffer.alloc(32, 10)
   lan.join(topic)
-  discovery.onPeer({
+  adapter.discover({
     port: 49800,
     txt: { v: '1', peerKey: Buffer.alloc(32, 2).toString('hex'), tc: '0' },
     referer: { address: '192.168.1.9' }
@@ -97,11 +101,11 @@ test('ignores its own mDNS record', async () => {
   const dht = new FakeDHT()
   const keyPair = { publicKey: Buffer.alloc(32, 3) }
   const swarm = new FakeSwarm(dht, keyPair)
-  const discovery = new FakeDiscovery()
-  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, discovery, eager: false })
+  const adapter = new FakeAdapter()
+  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
 
   await lan.ready()
-  discovery.onPeer({
+  adapter.discover({
     port: 49799,
     txt: { v: '1', peerKey: keyPair.publicKey.toString('hex'), tc: '0' },
     referer: { address: '192.168.1.10' }
@@ -116,17 +120,17 @@ test('can be destroyed while startup is in progress', async () => {
   const dht = new FakeDHT()
   const keyPair = { publicKey: Buffer.alloc(32, 4) }
   const swarm = new FakeSwarm(dht, keyPair)
-  const discovery = new FakeDiscovery()
+  const adapter = new FakeAdapter()
   let release
 
   dht.fullyBootstrapped = () => new Promise((resolve) => { release = resolve })
 
-  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, discovery, eager: false })
+  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
   const destroying = lan.destroy()
   release()
   await destroying
 
-  assert.equal(discovery.record, undefined)
+  assert.equal(adapter.record, undefined)
   assert.equal(lan.destroyed, true)
 })
 
@@ -134,17 +138,17 @@ test('join and session destroy update the advertised topic tokens', async () => 
   const dht = new FakeDHT()
   const keyPair = { publicKey: Buffer.alloc(32, 5) }
   const swarm = new FakeSwarm(dht, keyPair)
-  const discovery = new FakeDiscovery()
-  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, discovery, eager: false })
+  const adapter = new FakeAdapter()
+  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
 
   await lan.ready()
   const session = lan.join(Buffer.alloc(32, 12))
   await new Promise((resolve) => setImmediate(resolve))
-  assert.equal(discovery.record.txt.tc, '1')
+  assert.equal(adapter.record.txt.tc, '1')
 
   await session.destroy()
   await new Promise((resolve) => setImmediate(resolve))
-  assert.equal(discovery.record.txt.tc, '0')
+  assert.equal(adapter.record.txt.tc, '0')
 
   await lan.destroy()
 })

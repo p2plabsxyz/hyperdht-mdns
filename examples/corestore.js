@@ -1,11 +1,11 @@
 'use strict'
 
 const Corestore = require('corestore')
-const HyperswarmLAN = require('..')
+const HyperDHTmDNS = require('..')
 
 async function main () {
   const store = new Corestore('./userData/hyper')
-  const lan = new HyperswarmLAN({ port: 49799 })
+  const lan = new HyperDHTmDNS({ port: 49799 })
 
   lan.on('connection', (socket) => store.replicate(socket))
   lan.on('warning', console.warn)

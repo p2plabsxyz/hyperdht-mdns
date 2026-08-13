@@ -1,6 +1,6 @@
 'use strict'
 
-const { EventEmitter, once } = require('events')
+const { once } = require('events')
 const { randomBytes } = require('crypto')
 const { rm } = require('fs/promises')
 const { tmpdir } = require('os')
@@ -9,47 +9,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const HyperswarmLAN = require('..')
 const { attachHyperSDK } = HyperswarmLAN
-
-class MemoryDiscovery extends EventEmitter {
-  constructor (bus) {
-    super()
-    this.bus = bus
-    this.record = null
-    this.onPeer = null
-  }
-
-  start (record, onPeer) {
-    this.record = record
-    this.onPeer = onPeer
-
-    for (const peer of this.bus) {
-      setImmediate(() => {
-        onPeer(asService(peer.record))
-        peer.onPeer(asService(record))
-      })
-    }
-
-    this.bus.add(this)
-  }
-
-  update (record) {
-    this.record = record
-    for (const peer of this.bus) {
-      if (peer === this) continue
-      setImmediate(() => peer.onPeer(asService(record)))
-    }
-  }
-
-  stop () {
-    this.bus.delete(this)
-    return Promise.resolve()
-  }
-
-  destroy () {
-    this.bus.delete(this)
-    return Promise.resolve()
-  }
-}
+const MemoryAdapter = require('../test-utils/memory-adapter')
 
 test('two bootstrap-free swarms discover a shared topic through injected LAN nodes', { timeout: 30_000 }, async (t) => {
   const bus = new Set()
@@ -57,13 +17,13 @@ test('two bootstrap-free swarms discover a shared topic through injected LAN nod
     host: '127.0.0.1',
     port: 49831,
     allowLoopback: true,
-    discovery: new MemoryDiscovery(bus)
+    adapter: new MemoryAdapter(bus)
   })
   const b = new HyperswarmLAN({
     host: '127.0.0.1',
     port: 49832,
     allowLoopback: true,
-    discovery: new MemoryDiscovery(bus)
+    adapter: new MemoryAdapter(bus)
   })
 
   t.after(async () => Promise.allSettled([a.destroy(), b.destroy()]))
@@ -87,20 +47,19 @@ test('two bootstrap-free swarms discover a shared topic through injected LAN nod
   assert.equal(a.dht.bootstrapNodes.length, 0)
   assert.equal(b.dht.bootstrapNodes.length, 0)
 })
-
 test('nodes on different topics discover DHT endpoints but do not connect', { timeout: 10_000 }, async (t) => {
   const bus = new Set()
   const a = new HyperswarmLAN({
     host: '127.0.0.1',
     port: 49833,
     allowLoopback: true,
-    discovery: new MemoryDiscovery(bus)
+    adapter: new MemoryAdapter(bus)
   })
   const b = new HyperswarmLAN({
     host: '127.0.0.1',
     port: 49834,
     allowLoopback: true,
-    discovery: new MemoryDiscovery(bus)
+    adapter: new MemoryAdapter(bus)
   })
   t.after(async () => Promise.allSettled([a.destroy(), b.destroy()]))
 
@@ -117,20 +76,19 @@ test('nodes on different topics discover DHT endpoints but do not connect', { ti
 
   assert.equal(connected, false)
 })
-
 test('joining a shared topic after discovery triggers a matched connection', { timeout: 15_000 }, async (t) => {
   const bus = new Set()
   const a = new HyperswarmLAN({
     host: '127.0.0.1',
     port: 49835,
     allowLoopback: true,
-    discovery: new MemoryDiscovery(bus)
+    adapter: new MemoryAdapter(bus)
   })
   const b = new HyperswarmLAN({
     host: '127.0.0.1',
     port: 49836,
     allowLoopback: true,
-    discovery: new MemoryDiscovery(bus)
+    adapter: new MemoryAdapter(bus)
   })
   t.after(async () => Promise.allSettled([a.destroy(), b.destroy()]))
 
@@ -170,13 +128,13 @@ test('hyper-sdk 6.2.2 receives matched LAN connections while public DHT is isola
     host: '127.0.0.1',
     port: 49839,
     allowLoopback: true,
-    discovery: new MemoryDiscovery(bus)
+    adapter: new MemoryAdapter(bus)
   })
   await attachHyperSDK(sdkB, {
     host: '127.0.0.1',
     port: 49840,
     allowLoopback: true,
-    discovery: new MemoryDiscovery(bus)
+    adapter: new MemoryAdapter(bus)
   })
 
   const topic = randomBytes(32)
@@ -193,11 +151,3 @@ test('hyper-sdk 6.2.2 receives matched LAN connections while public DHT is isola
   assert.equal(sdkA.localSwarm.keyPair, sdkA.swarm.keyPair)
   assert.equal(sdkB.localSwarm.keyPair, sdkB.swarm.keyPair)
 })
-
-function asService (record) {
-  return {
-    ...record,
-    referer: { address: '127.0.0.1' },
-    addresses: ['127.0.0.1']
-  }
-}

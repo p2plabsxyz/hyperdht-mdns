@@ -6,10 +6,16 @@
   "type": "commonjs",
   "files": [
     "index.js",
-    "src"
+    "src",
+    "examples/three-box-chat.js"
   ],
+  "bin": {
+    "hyperdht-mdns-chat": "examples/three-box-chat.js"
+  },
   "scripts": {
+    "demo:lan": "node examples/three-box-chat.js",
     "test": "node --test",
+    "test:mdns": "node test-utils/bonjour-smoke.js",
     "lint": "standard"
   },
   "keywords": [
@@ -26,8 +32,10 @@
   },
   "dependencies": {
     "bonjour-service": "^1.3.0",
+    "compact-encoding": "^3.3.0",
     "hyperdht": "^6.26.0",
-    "hyperswarm": "^4.15.0"
+    "hyperswarm": "^4.15.0",
+    "protomux": "^3.10.3"
   },
   "devDependencies": {
     "hyper-sdk": "^6.2.2",

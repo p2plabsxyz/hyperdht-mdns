@@ -1,6 +1,6 @@
 # hyperdht-mdns
 
-Offline LAN discovery for Hyperswarm using system-aware mDNS and an isolated
+Offline LAN discovery for Hyperswarm using zero-install mDNS and an isolated
 HyperDHT.
 
 Experimental offline LAN discovery for Hyperswarm and Corestore applications.
@@ -14,17 +14,17 @@ grows.
 ## Install
 
 ```sh
-npm install hyperswarm-lan
+npm install hyperdht-mdns
 ```
 
 ## Usage
 
 ```js
 const Corestore = require('corestore')
-const HyperswarmLAN = require('hyperswarm-lan')
+const HyperDHTmDNS = require('hyperdht-mdns')
 
 const store = new Corestore('./userData/hyper')
-const lan = new HyperswarmLAN({ port: 49799 })
+const lan = new HyperDHTmDNS({ port: 49799 })
 
 lan.on('connection', (socket) => store.replicate(socket))
 lan.on('warning', console.warn)
@@ -45,10 +45,10 @@ event, and includes LAN shutdown in the SDK lifecycle:
 
 ```js
 import { create as createSDK } from 'hyper-sdk'
-import HyperswarmLAN from 'hyperswarm-lan'
+import HyperDHTmDNS from 'hyperdht-mdns'
 
 const sdk = await createSDK({ storage: './userData/hyper' })
-await HyperswarmLAN.attachHyperSDK(sdk, { port: 49799 })
+await HyperDHTmDNS.attachHyperSDK(sdk, { port: 49799 })
 
 sdk.join(roomTopic)
 
@@ -66,11 +66,11 @@ and join both swarms:
 ```js
 const HyperDHT = require('hyperdht')
 const Hyperswarm = require('hyperswarm')
-const HyperswarmLAN = require('hyperswarm-lan')
+const HyperDHTmDNS = require('hyperdht-mdns')
 
 const keyPair = HyperDHT.keyPair()
 const globalSwarm = new Hyperswarm({ keyPair })
-const lanSwarm = new HyperswarmLAN({ keyPair, port: 49799 })
+const lanSwarm = new HyperDHTmDNS({ keyPair, port: 49799 })
 
 globalSwarm.on('connection', replicate)
 lanSwarm.on('connection', replicate)
@@ -81,7 +81,7 @@ lanSwarm.join(topic)
 
 ## API
 
-### `const lan = new HyperswarmLAN([options])`
+### `const lan = new HyperDHTmDNS([options])`
 
 - `port`: fixed UDP firewall port. Defaults to `49799`.
 - `host`: local IPv4 address to advertise as the DHT address. By default the
@@ -90,9 +90,28 @@ lanSwarm.join(topic)
 - `eager`: enable a direct connection for matching topics. Defaults to `true`.
   This is required for reliable two-node DHT networks.
 - `dhtOptions` and `swarmOptions`: additional constructor options.
-- `discovery`: custom mDNS adapter implementing `start(record, onPeer)`,
-  `update(record)`, `stop()`, and `destroy()`. This allows a system-daemon
-  adapter to replace the default cross-platform Bonjour implementation.
+- `adapter`: custom mDNS adapter implementing only `advertise()` and `browse()`.
+  The default is `BonjourAdapter`, backed by the zero-install, pure-JavaScript
+  `bonjour-service` package. Mobile applications can inject a system Bonjour or
+  Android NSD implementation without changing any HyperDHT logic.
+
+An adapter has this shape; either method may also return its handle in a
+Promise:
+
+```js
+const adapter = {
+  advertise (record, { onError }) {
+    return { stop: async () => {} }
+  },
+  browse ({ type, protocol }, { onService, onServiceDown, onError }) {
+    return { stop: async () => {} }
+  }
+}
+```
+
+The module owns record refreshes: it stops the old advertisement and calls
+`advertise()` again when joined topics change. A custom backend only needs to
+publish records, report discovered services, and stop its returned handles.
 
 The instance exposes `ready()`, `join()`, `leave()`, `joinPeer()`, `leavePeer()`,
 `listen()`, `flush()`, `topics()`, `suspend()`, `resume()`, and `destroy()`. It
@@ -135,3 +154,31 @@ third routing node. Nodes with no shared topic do not connect.
 The current default mDNS implementation is pure JavaScript and uses socket
 reuse on port 5353. The adapter boundary exists because native system-daemon
 bindings remain platform-dependent.
+
+To smoke-test the real default adapter with two local DHT nodes before using
+physical computers, run `npm run test:mdns`.
+
+## Three-computer offline test
+
+Before testing PeerChat, use the standalone CLI to verify that HyperDHT works
+with LAN-only addresses. Install dependencies on three Windows, macOS, or Linux
+computers connected to the same multicast-capable LAN, then disconnect or block
+internet access and run:
+
+```sh
+npm run demo:lan -- --name windows --room test-room
+npm run demo:lan -- --name mac --room test-room
+npm run demo:lan -- --name linux --room test-room
+```
+
+Run one command on each computer, using the same room and a different name. The
+output on every computer must show:
+
+- `bootstrap nodes: 0`;
+- the other two mDNS records as discovered and reachable;
+- two authenticated HyperDHT connections; and
+- messages entered on any computer arriving on the other two.
+
+Allow UDP `5353` and `49799` through each firewall. If a computer has multiple
+network interfaces, pass its LAN address with `--host`. Use `--port` only when
+the default DHT port is unavailable.

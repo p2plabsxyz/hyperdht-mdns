@@ -3,10 +3,12 @@
 const { EventEmitter } = require('events')
 const HyperDHT = require('hyperdht')
 const Hyperswarm = require('hyperswarm')
-const BonjourDiscovery = require('./bonjour-discovery')
+const BonjourAdapter = require('./bonjour-adapter')
 const { selectLocalIPv4, serviceIPv4 } = require('./network')
 const {
   MAX_ADVERTISED_TOPICS,
+  SERVICE_PROTOCOL,
+  SERVICE_TYPE,
   createRecord,
   parseRecord,
   topicToken
@@ -57,7 +59,10 @@ class HyperswarmLAN extends EventEmitter {
       throw new TypeError('The swarm keyPair must expose a publicKey Buffer')
     }
 
-    this.discovery = opts.discovery || new BonjourDiscovery(opts.mdnsOptions)
+    this.adapter = opts.adapter || new BonjourAdapter(opts.mdnsOptions)
+    assertAdapter(this.adapter)
+    this._browser = null
+    this._advertisement = null
     this._onServiceDiscovered = (service) => {
       this._handleService(service).catch((error) => this.emit('warning', error))
     }
@@ -68,9 +73,6 @@ class HyperswarmLAN extends EventEmitter {
 
     this.swarm.on('connection', this._onConnection)
     this.swarm.on('update', this._onUpdate)
-    this.discovery.on('error', this._onDiscoveryError)
-    this.discovery.on('down', this._onDiscoveryDown)
-
     this._opening = this._open()
   }
 
@@ -95,7 +97,7 @@ class HyperswarmLAN extends EventEmitter {
     if (address && address.port) this.port = address.port
 
     const record = this._createRecord()
-    await this.discovery.start(record, this._onServiceDiscovered)
+    await this._startDiscovery(record)
     if (this.destroyed) return
 
     this._advertisedSignature = recordSignature(record)
@@ -218,11 +220,15 @@ class HyperswarmLAN extends EventEmitter {
     const record = this._createRecord()
     const signature = recordSignature(record)
     if (signature === this._advertisedSignature) return
-    if (typeof this.discovery.update !== 'function') {
-      throw new Error('The mDNS discovery adapter must implement update(record)')
-    }
+    const previous = this._advertisement
+    this._advertisement = null
+    await stopHandle(previous)
+    if (!this._advertising || this.suspended || this.destroyed) return
 
-    await this.discovery.update(record)
+    this._advertisement = await this.adapter.advertise(record, {
+      onError: this._onDiscoveryError
+    })
+    assertHandle(this._advertisement, 'advertise')
     this._advertisedSignature = signature
   }
 
@@ -407,7 +413,8 @@ class HyperswarmLAN extends EventEmitter {
     this.suspended = true
     this._advertising = false
 
-    if (typeof this.discovery.stop === 'function') await this.discovery.stop()
+    await this._advertisementQueue
+    await this._stopDiscovery()
     for (const socket of this._directConnections.values()) socket.destroy()
     this._directConnections.clear()
     await this.swarm.suspend(opts)
@@ -416,8 +423,9 @@ class HyperswarmLAN extends EventEmitter {
   async resume (opts) {
     if (!this.suspended || this.destroyed) return
     await this.swarm.resume(opts)
-    await this.discovery.start(this._createRecord(), this._onServiceDiscovered)
-    this._advertisedSignature = recordSignature(this._createRecord())
+    const record = this._createRecord()
+    await this._startDiscovery(record)
+    this._advertisedSignature = recordSignature(record)
     this._advertising = true
     this.suspended = false
   }
@@ -435,15 +443,47 @@ class HyperswarmLAN extends EventEmitter {
     this._advertising = false
     this.swarm.removeListener('connection', this._onConnection)
     this.swarm.removeListener('update', this._onUpdate)
-    this.discovery.removeListener('error', this._onDiscoveryError)
-    this.discovery.removeListener('down', this._onDiscoveryDown)
-
-    await this.discovery.destroy()
+    await this._advertisementQueue
+    await this._stopDiscovery()
     for (const socket of this._directConnections.values()) socket.destroy()
     this._directConnections.clear()
     if (this._destroySwarm) await this.swarm.destroy()
 
     this.emit('close')
+  }
+
+  async _startDiscovery (record) {
+    const browser = await this.adapter.browse({
+      type: SERVICE_TYPE,
+      protocol: SERVICE_PROTOCOL
+    }, {
+      onService: this._onServiceDiscovered,
+      onServiceDown: this._onDiscoveryDown,
+      onError: this._onDiscoveryError
+    })
+    assertHandle(browser, 'browse')
+
+    let advertisement
+    try {
+      advertisement = await this.adapter.advertise(record, {
+        onError: this._onDiscoveryError
+      })
+      assertHandle(advertisement, 'advertise')
+    } catch (error) {
+      await stopHandle(browser)
+      throw error
+    }
+
+    this._browser = browser
+    this._advertisement = advertisement
+  }
+
+  async _stopDiscovery () {
+    const browser = this._browser
+    const advertisement = this._advertisement
+    this._browser = null
+    this._advertisement = null
+    await Promise.all([stopHandle(browser), stopHandle(advertisement)])
   }
 }
 
@@ -456,6 +496,22 @@ function assertTopic (topic) {
   if (!Buffer.isBuffer(topic) || topic.byteLength !== 32) {
     throw new TypeError('topic must be a 32-byte Buffer')
   }
+}
+
+function assertAdapter (adapter) {
+  if (!adapter || typeof adapter.advertise !== 'function' || typeof adapter.browse !== 'function') {
+    throw new TypeError('adapter must implement advertise(record, handlers) and browse(query, handlers)')
+  }
+}
+
+function assertHandle (handle, method) {
+  if (!handle || typeof handle.stop !== 'function') {
+    throw new TypeError(`adapter.${method}() must return a handle with stop()`)
+  }
+}
+
+function stopHandle (handle) {
+  return handle ? handle.stop() : Promise.resolve()
 }
 
 function recordSignature (record) {
