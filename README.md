@@ -1,2 +1,137 @@
-# hyperswarm-offline
-A distributed networking stack for connecting peers with offline discovery.
+# hyperdht-mdns
+
+Offline LAN discovery for Hyperswarm using system-aware mDNS and an isolated
+HyperDHT.
+
+Experimental offline LAN discovery for Hyperswarm and Corestore applications.
+Each process runs a separate, bootstrap-free HyperDHT and advertises one mDNS
+service (`_hyperswarm-lan._udp`). mDNS exchanges node endpoints and hashed topic
+tokens. Nodes make one authenticated, encrypted connection only when they share
+a joined topic; Corestore multiplexes shared cores over that stream. Isolated
+Hyperswarm topic joins also remain active for normal DHT discovery as the LAN
+grows.
+
+## Install
+
+```sh
+npm install hyperswarm-lan
+```
+
+## Usage
+
+```js
+const Corestore = require('corestore')
+const HyperswarmLAN = require('hyperswarm-lan')
+
+const store = new Corestore('./userData/hyper')
+const lan = new HyperswarmLAN({ port: 49799 })
+
+lan.on('connection', (socket) => store.replicate(socket))
+lan.on('warning', console.warn)
+
+await store.ready()
+await lan.ready()
+
+const core = store.get({ name: 'messages' })
+await core.ready()
+lan.join(core.discoveryKey)
+```
+
+### hyper-sdk
+
+Attach LAN discovery to an existing SDK. This reuses its network key pair,
+mirrors joins and leaves, forwards LAN connections through the existing swarm
+event, and includes LAN shutdown in the SDK lifecycle:
+
+```js
+import { create as createSDK } from 'hyper-sdk'
+import HyperswarmLAN from 'hyperswarm-lan'
+
+const sdk = await createSDK({ storage: './userData/hyper' })
+await HyperswarmLAN.attachHyperSDK(sdk, { port: 49799 })
+
+sdk.join(roomTopic)
+
+// Optional: connectivity monitor can disable only the public swarm.
+await sdk.setLANOnly(true)
+await sdk.setLANOnly(false) // internet is reachable again
+```
+
+The bridge makes `sdk.swarm.flush()` LAN-first: public DHT flushing continues in
+the background, so loss of internet access does not block a local room join.
+
+To manage global and LAN discovery manually, reuse the same network key pair
+and join both swarms:
+
+```js
+const HyperDHT = require('hyperdht')
+const Hyperswarm = require('hyperswarm')
+const HyperswarmLAN = require('hyperswarm-lan')
+
+const keyPair = HyperDHT.keyPair()
+const globalSwarm = new Hyperswarm({ keyPair })
+const lanSwarm = new HyperswarmLAN({ keyPair, port: 49799 })
+
+globalSwarm.on('connection', replicate)
+lanSwarm.on('connection', replicate)
+
+globalSwarm.join(topic)
+lanSwarm.join(topic)
+```
+
+## API
+
+### `const lan = new HyperswarmLAN([options])`
+
+- `port`: fixed UDP firewall port. Defaults to `49799`.
+- `host`: local IPv4 address to advertise as the DHT address. By default the
+  module selects a private, non-loopback interface.
+- `keyPair`: HyperDHT key pair. Reuse the global swarm key pair when applicable.
+- `eager`: enable a direct connection for matching topics. Defaults to `true`.
+  This is required for reliable two-node DHT networks.
+- `dhtOptions` and `swarmOptions`: additional constructor options.
+- `discovery`: custom mDNS adapter implementing `start(record, onPeer)`,
+  `update(record)`, `stop()`, and `destroy()`. This allows a system-daemon
+  adapter to replace the default cross-platform Bonjour implementation.
+
+The instance exposes `ready()`, `join()`, `leave()`, `joinPeer()`, `leavePeer()`,
+`listen()`, `flush()`, `topics()`, `suspend()`, `resume()`, and `destroy()`. It
+emits `connection`, `topics-change`, `peer`, `peer-reachable`, `peer-down`,
+`warning`, `error`, `ready`, and `close` events.
+
+## mDNS record
+
+One service is published per process:
+
+```json
+{
+  "v": "1",
+  "peerKey": "<64-hex-hyperswarm-public-key>",
+  "port": "49799",
+  "tc": "1",
+  "t0": "<base64url-sha256-topic-token>"
+}
+```
+
+Each token is `SHA256("hyperswarm-lan:" + topic)` encoded as unpadded base64url.
+Raw discovery keys are never advertised. TXT values are chunked below the DNS
+255-byte string limit, and one node may advertise up to 32 active topics.
+
+Two-node DHTs have a storage symmetry problem: each node stores its announcement
+on the other node, then queries that other node and sees only its own record.
+The direct matching connection uses the advertised endpoint as HyperDHT's relay
+address, preserving its authenticated Noise/UDX transport without waiting for a
+third routing node. Nodes with no shared topic do not connect.
+
+## Network requirements
+
+- Allow inbound and outbound UDP on the configured DHT port.
+- Allow mDNS multicast on UDP `5353` (`224.0.0.251`).
+- Peers must be on a multicast-capable IPv4 LAN. Guest Wi-Fi networks commonly
+  enable client isolation and will prevent both discovery and direct traffic.
+- Run one instance per UDP port on a device. Configure another fixed port when
+  running multiple processes on the same host.
+
+The current default mDNS implementation is pure JavaScript and uses socket
+reuse on port 5353. The adapter boundary exists because native system-daemon
+bindings remain platform-dependent.
