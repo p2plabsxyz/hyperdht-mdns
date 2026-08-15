@@ -179,3 +179,39 @@ test('join and session destroy update the advertised topic tokens', async () => 
 
   await lan.destroy()
 })
+
+test('resume re-detects host IP and clears stale peers on network change', async () => {
+  const dht = new FakeDHT()
+  const keyPair = { publicKey: Buffer.alloc(32, 8) }
+  const swarm = new FakeSwarm(dht, keyPair)
+  const adapter = new FakeAdapter()
+  const lan = new HyperswarmLAN({ host: '192.168.1.50', dht, swarm, adapter, eager: false })
+
+  await lan.ready()
+
+  // Discover a peer on the current subnet
+  const topic = Buffer.alloc(32, 20)
+  lan.join(topic)
+  adapter.discover({
+    port: 49800,
+    txt: { v: '1', peerKey: Buffer.alloc(32, 9).toString('hex'), tc: '0' },
+    referer: { address: '192.168.1.51' }
+  })
+  await once(lan, 'peer-reachable')
+  assert.equal(lan._knownPeers.size, 1)
+
+  // Suspend (simulates going offline / switching WiFi)
+  await lan.suspend()
+  assert.equal(lan.suspended, true)
+
+  // Resume will call selectLocalIPv4(). If the result differs from the
+  // current this.host, stale peers are cleared. On the test machine the
+  // real system IP will differ from the hardcoded '192.168.1.50', so the
+  // branch that clears _knownPeers is exercised automatically.
+  await lan.resume()
+  assert.equal(lan.suspended, false)
+  assert.equal(lan._knownPeers.size, 0, 'stale peers from old network should be cleared')
+  assert.ok(lan.host, 'host should be set after resume')
+
+  await lan.destroy()
+})

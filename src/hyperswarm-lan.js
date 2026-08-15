@@ -25,7 +25,8 @@ class HyperswarmLAN extends EventEmitter {
 
     this.destroyed = false
     this.suspended = false
-    this.host = opts.host || selectLocalIPv4(undefined, opts.allowLoopback === true)
+    this._allowLoopback = opts.allowLoopback === true
+    this.host = opts.host || selectLocalIPv4(undefined, this._allowLoopback)
     this.port = opts.port === undefined ? DEFAULT_PORT : opts.port
     this._destroySwarm = opts.destroySwarm !== false
     this._direct = opts.eager !== false
@@ -513,6 +514,18 @@ class HyperswarmLAN extends EventEmitter {
 
   async resume (opts) {
     if (!this.suspended || this.destroyed) return
+    
+    try {
+      const freshHost = selectLocalIPv4(undefined, this._allowLoopback)
+      if (freshHost !== this.host) {
+        this.host = freshHost
+        this._knownPeers.clear()
+        this._peerTopics.clear()
+      }
+    } catch (error) {
+      this.emit('warning', error)
+    }
+
     await this.swarm.resume(opts)
     this.suspended = false
     const record = this._createRecord()
