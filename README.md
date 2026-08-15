@@ -118,6 +118,11 @@ The instance exposes `ready()`, `join()`, `leave()`, `joinPeer()`, `leavePeer()`
 emits `connection`, `topics-change`, `peer`, `peer-reachable`, `peer-down`,
 `warning`, `error`, `ready`, and `close` events.
 
+Matching peers are reconnected automatically after transient socket loss using
+bounded exponential backoff. Retries stop when the discovery adapter reports
+the peer down, the last shared topic is left, or the instance is suspended or
+destroyed.
+
 ## mDNS record
 
 One service is published per process:
@@ -160,10 +165,10 @@ physical computers, run `npm run test:mdns`.
 
 ## Three-computer offline test
 
-Before testing PeerChat, use the standalone CLI to verify that HyperDHT works
-with LAN-only addresses. Install dependencies on three Windows, macOS, or Linux
-computers connected to the same multicast-capable LAN, then disconnect or block
-internet access and run:
+Before integrating the module into an application, use the standalone CLI to
+verify that HyperDHT works with LAN-only addresses. Install dependencies on
+three Windows, macOS, or Linux computers connected to the same
+multicast-capable LAN, then disconnect or block internet access and run:
 
 ```sh
 npm run demo:lan -- --name windows --room test-room
@@ -178,6 +183,11 @@ output on every computer must show:
 - the other two mDNS records as discovered and reachable;
 - two authenticated HyperDHT connections; and
 - messages entered on any computer arriving on the other two.
+
+After the first successful exchange, interrupt one machine's LAN connection and
+restore it without restarting the CLI. The peers should reconnect and exchange
+messages again. Repeat the interruption once more to cover consecutive recovery
+cycles.
 
 Allow UDP `5353` and `49799` through each firewall. If a computer has multiple
 network interfaces, pass its LAN address with `--host`. Use `--port` only when

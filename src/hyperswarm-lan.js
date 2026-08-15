@@ -16,6 +16,8 @@ const {
 
 const DEFAULT_PORT = 49799
 const PEER_REFRESH_INTERVAL = 30_000
+const RECONNECT_INITIAL_DELAY = 250
+const RECONNECT_MAX_DELAY = 30_000
 
 class HyperswarmLAN extends EventEmitter {
   constructor (opts = {}) {
@@ -32,6 +34,8 @@ class HyperswarmLAN extends EventEmitter {
     this._peerTopics = new Map()
     this._directConnections = new Map()
     this._connectionInfo = new Map()
+    this._reconnectAttempts = new Map()
+    this._reconnectTimers = new Map()
     this._advertising = false
     this._advertisedSignature = null
     this._advertisementQueue = Promise.resolve()
@@ -69,7 +73,10 @@ class HyperswarmLAN extends EventEmitter {
     this._onConnection = (socket, peerInfo) => this._handleSwarmConnection(socket, peerInfo)
     this._onUpdate = () => this.emit('update')
     this._onDiscoveryError = (error) => this.emit('error', error)
-    this._onDiscoveryDown = (service) => this.emit('peer-down', service)
+    this._onDiscoveryDown = (service) => {
+      this._handleServiceDown(service)
+      this.emit('peer-down', service)
+    }
 
     this.swarm.on('connection', this._onConnection)
     this.swarm.on('update', this._onUpdate)
@@ -257,7 +264,7 @@ class HyperswarmLAN extends EventEmitter {
     await this._considerPeer(peer)
   }
 
-  async _considerPeer (peer) {
+  async _considerPeer (peer, force = false) {
     if (this.destroyed || this.suspended) return
 
     const id = peer.publicKey.toString('hex')
@@ -268,25 +275,37 @@ class HyperswarmLAN extends EventEmitter {
     this._peerTopics.set(id, matchedTopics)
     this._updateConnectionTopics(id, matchedTopics)
 
-    if (matchedTopics.length === 0) this._disconnectDirect(id)
+    if (matchedTopics.length === 0) {
+      this._cancelReconnect(id)
+      this._disconnectDirect(id)
+    }
 
-    if (signature === peer.lastSignature && now - peer.lastSeen < PEER_REFRESH_INTERVAL) return
-    peer.lastSignature = signature
-    peer.lastSeen = now
+    const shouldAnnounce = signature !== peer.lastSignature ||
+      now - peer.lastSeen >= PEER_REFRESH_INTERVAL
 
-    const visiblePeer = { ...peer, topics: matchedTopics }
-    delete visiblePeer.lastSignature
-    delete visiblePeer.lastSeen
-    this.emit('peer', visiblePeer)
+    if (shouldAnnounce) {
+      peer.lastSignature = signature
+      peer.lastSeen = now
+      this.emit('peer', visiblePeer(peer, matchedTopics))
+    }
 
-    if (!peer.reachable) {
+    if (!force && !shouldAnnounce) {
+      if (peer.reachable && matchedTopics.length > 0) {
+        this._connectDirect(peer, matchedTopics)
+      }
+      return
+    }
+
+    if (!peer.reachable || force) {
       this.dht.addNode(peer)
 
       try {
         await this.dht.ping(peer, { retry: false })
       } catch (error) {
+        peer.reachable = false
         error.message = `Could not reach discovered LAN DHT node ${peer.host}:${peer.port}: ${error.message}`
         this.emit('warning', error)
+        this._scheduleReconnect(id)
         return
       }
 
@@ -299,7 +318,23 @@ class HyperswarmLAN extends EventEmitter {
     }
 
     if (this._direct && matchedTopics.length > 0) this._connectDirect(peer, matchedTopics)
-    this.emit('peer-reachable', visiblePeer)
+    if (shouldAnnounce || force) this.emit('peer-reachable', visiblePeer(peer, matchedTopics))
+  }
+
+  _handleServiceDown (service) {
+    const record = parseRecord(service)
+    const host = serviceIPv4(service)
+    if (!record || !host || record.peerKey.equals(this.keyPair.publicKey)) return
+
+    const id = record.peerKey.toString('hex')
+    const peer = this._knownPeers.get(id)
+    if (!peer) return
+    if (peer.host !== host || peer.port !== record.port || !sameTokens(peer.tokens, record.tokens)) return
+
+    this._knownPeers.delete(id)
+    this._peerTopics.delete(id)
+    this._cancelReconnect(id)
+    this._disconnectDirect(id)
   }
 
   _matchingTopics (tokens) {
@@ -357,6 +392,7 @@ class HyperswarmLAN extends EventEmitter {
     this._directConnections.set(id, socket)
 
     socket.once('open', () => {
+      this._cancelReconnect(id)
       this._emitConnection(socket, {
         publicKey: peer.publicKey,
         relayAddresses,
@@ -374,6 +410,7 @@ class HyperswarmLAN extends EventEmitter {
       if (this._directConnections.get(id) === socket) this._directConnections.delete(id)
       if (this._connectionInfo.get(id)?.socket === socket) this._connectionInfo.delete(id)
       this.emit('update')
+      this._scheduleReconnect(id)
     })
   }
 
@@ -386,9 +423,11 @@ class HyperswarmLAN extends EventEmitter {
 
     if (direct) this._directConnections.set(id, socket)
     this._connectionInfo.set(id, { socket, info })
+    this._cancelReconnect(id)
     socket.once('close', () => {
       if (this._directConnections.get(id) === socket) this._directConnections.delete(id)
       if (this._connectionInfo.get(id)?.socket === socket) this._connectionInfo.delete(id)
+      this._scheduleReconnect(id)
     })
 
     this.emit('connection', socket, info)
@@ -403,8 +442,58 @@ class HyperswarmLAN extends EventEmitter {
   }
 
   _disconnectDirect (id) {
-    const socket = this._directConnections.get(id)
-    if (socket) socket.destroy()
+    const direct = this._directConnections.get(id)
+    const active = this._connectionInfo.get(id)?.socket
+    if (direct) direct.destroy()
+    if (active && active !== direct) active.destroy()
+  }
+
+  _scheduleReconnect (id) {
+    if (!this._canReconnect(id) || this._reconnectTimers.has(id)) return
+
+    const attempt = this._reconnectAttempts.get(id) || 0
+    const cappedAttempt = Math.min(attempt, 16)
+    const delay = Math.min(RECONNECT_INITIAL_DELAY * (2 ** cappedAttempt), RECONNECT_MAX_DELAY)
+    this._reconnectAttempts.set(id, Math.min(cappedAttempt + 1, 16))
+
+    const timer = setTimeout(() => {
+      this._reconnectTimers.delete(id)
+      if (!this._canReconnect(id)) return
+
+      const peer = this._knownPeers.get(id)
+      peer.reachable = false
+      this._considerPeer(peer, true).catch((error) => {
+        this.emit('warning', error)
+        this._scheduleReconnect(id)
+      })
+    }, delay)
+    timer.unref?.()
+    this._reconnectTimers.set(id, timer)
+  }
+
+  _canReconnect (id) {
+    if (this.destroyed || this.suspended || !this._direct) return false
+
+    const peer = this._knownPeers.get(id)
+    if (!peer || Buffer.compare(this.keyPair.publicKey, peer.publicKey) > 0) return false
+    if (this._matchingTopics(peer.tokens).length === 0) return false
+
+    const direct = this._directConnections.get(id)
+    const active = this._connectionInfo.get(id)?.socket
+    return (!direct || direct.destroyed) && (!active || active.destroyed)
+  }
+
+  _cancelReconnect (id) {
+    const timer = this._reconnectTimers.get(id)
+    if (timer) clearTimeout(timer)
+    this._reconnectTimers.delete(id)
+    this._reconnectAttempts.delete(id)
+  }
+
+  _cancelAllReconnects () {
+    for (const timer of this._reconnectTimers.values()) clearTimeout(timer)
+    this._reconnectTimers.clear()
+    this._reconnectAttempts.clear()
   }
 
   async suspend (opts) {
@@ -415,6 +504,8 @@ class HyperswarmLAN extends EventEmitter {
 
     await this._advertisementQueue
     await this._stopDiscovery()
+    this._cancelAllReconnects()
+    for (const peer of this._knownPeers.values()) peer.reachable = false
     for (const socket of this._directConnections.values()) socket.destroy()
     this._directConnections.clear()
     await this.swarm.suspend(opts)
@@ -423,11 +514,21 @@ class HyperswarmLAN extends EventEmitter {
   async resume (opts) {
     if (!this.suspended || this.destroyed) return
     await this.swarm.resume(opts)
+    this.suspended = false
     const record = this._createRecord()
-    await this._startDiscovery(record)
+    try {
+      await this._startDiscovery(record)
+    } catch (error) {
+      this.suspended = true
+      throw error
+    }
     this._advertisedSignature = recordSignature(record)
     this._advertising = true
-    this.suspended = false
+
+    for (const peer of this._knownPeers.values()) {
+      peer.reachable = false
+      this._considerPeer(peer, true).catch((error) => this.emit('warning', error))
+    }
   }
 
   async destroy () {
@@ -441,6 +542,7 @@ class HyperswarmLAN extends EventEmitter {
     }
 
     this._advertising = false
+    this._cancelAllReconnects()
     this.swarm.removeListener('connection', this._onConnection)
     this.swarm.removeListener('update', this._onUpdate)
     await this._advertisementQueue
@@ -516,6 +618,17 @@ function stopHandle (handle) {
 
 function recordSignature (record) {
   return JSON.stringify(record.txt)
+}
+
+function visiblePeer (peer, topics) {
+  const visible = { ...peer, topics }
+  delete visible.lastSignature
+  delete visible.lastSeen
+  return visible
+}
+
+function sameTokens (a, b) {
+  return a.length === b.length && a.every((token, index) => token === b[index])
 }
 
 function refreshAll (discoveries) {

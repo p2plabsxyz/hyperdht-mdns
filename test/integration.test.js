@@ -47,6 +47,93 @@ test('two bootstrap-free swarms discover a shared topic through injected LAN nod
   assert.equal(a.dht.bootstrapNodes.length, 0)
   assert.equal(b.dht.bootstrapNodes.length, 0)
 })
+
+test('reconnects a known shared-topic peer after repeated socket loss', { timeout: 30_000 }, async (t) => {
+  const bus = new Set()
+  const a = new HyperswarmLAN({
+    host: '127.0.0.1',
+    port: 49841,
+    allowLoopback: true,
+    adapter: new MemoryAdapter(bus)
+  })
+  const b = new HyperswarmLAN({
+    host: '127.0.0.1',
+    port: 49842,
+    allowLoopback: true,
+    adapter: new MemoryAdapter(bus)
+  })
+
+  t.after(async () => Promise.allSettled([a.destroy(), b.destroy()]))
+
+  const topic = randomBytes(32)
+  const firstA = once(a, 'connection')
+  const firstB = once(b, 'connection')
+  a.join(topic)
+  b.join(topic)
+  await Promise.all([a.ready(), b.ready()])
+
+  let [[aSocket, aInfo], [bSocket, bInfo]] = await Promise.all([firstA, firstB])
+  aSocket.on('error', () => {})
+  bSocket.on('error', () => {})
+  assert.deepEqual(aInfo.topics, [topic])
+  assert.deepEqual(bInfo.topics, [topic])
+
+  for (let cycle = 0; cycle < 2; cycle++) {
+    const nextA = once(a, 'connection')
+    const nextB = once(b, 'connection')
+    aSocket.destroy()
+
+    const [nextPairA, nextPairB] = await Promise.all([nextA, nextB])
+    aSocket = nextPairA[0]
+    aInfo = nextPairA[1]
+    bSocket = nextPairB[0]
+    bInfo = nextPairB[1]
+    aSocket.on('error', () => {})
+    bSocket.on('error', () => {})
+    assert.deepEqual(aInfo.topics, [topic])
+    assert.deepEqual(bInfo.topics, [topic])
+  }
+})
+
+test('rediscovers a shared-topic peer after repeated suspend and resume cycles', { timeout: 30_000 }, async (t) => {
+  const bus = new Set()
+  const a = new HyperswarmLAN({
+    host: '127.0.0.1',
+    port: 49843,
+    allowLoopback: true,
+    adapter: new MemoryAdapter(bus)
+  })
+  const b = new HyperswarmLAN({
+    host: '127.0.0.1',
+    port: 49844,
+    allowLoopback: true,
+    adapter: new MemoryAdapter(bus)
+  })
+
+  t.after(async () => Promise.allSettled([a.destroy(), b.destroy()]))
+
+  const topic = randomBytes(32)
+  const firstA = once(a, 'connection')
+  const firstB = once(b, 'connection')
+  a.join(topic)
+  b.join(topic)
+  await Promise.all([a.ready(), b.ready(), firstA, firstB])
+
+  for (let cycle = 0; cycle < 2; cycle++) {
+    const peerDown = once(b, 'peer-down')
+    await a.suspend()
+    await peerDown
+
+    const nextA = once(a, 'connection')
+    const nextB = once(b, 'connection')
+    await a.resume()
+    const [[aSocket, aInfo], [bSocket, bInfo]] = await Promise.all([nextA, nextB])
+    aSocket.on('error', () => {})
+    bSocket.on('error', () => {})
+    assert.deepEqual(aInfo.topics, [topic])
+    assert.deepEqual(bInfo.topics, [topic])
+  }
+})
 test('nodes on different topics discover DHT endpoints but do not connect', { timeout: 10_000 }, async (t) => {
   const bus = new Set()
   const a = new HyperswarmLAN({

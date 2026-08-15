@@ -1,6 +1,6 @@
 'use strict'
 
-const { EventEmitter } = require('events')
+const { EventEmitter, once } = require('events')
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const HyperswarmLAN = require('..')
@@ -61,6 +61,7 @@ class FakeAdapter {
   }
 
   discover (service) { this.handlers.onService(service) }
+  down (service) { this.handlers.onServiceDown(service) }
 }
 
 test('adds a discovered endpoint and refreshes active topics', async () => {
@@ -113,6 +114,32 @@ test('ignores its own mDNS record', async () => {
   await new Promise((resolve) => setImmediate(resolve))
 
   assert.equal(dht.nodes.length, 0)
+  await lan.destroy()
+})
+
+test('forgets a matching peer when the discovery adapter reports it down', async () => {
+  const dht = new FakeDHT()
+  const keyPair = { publicKey: Buffer.alloc(32, 6) }
+  const swarm = new FakeSwarm(dht, keyPair)
+  const adapter = new FakeAdapter()
+  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
+  const service = {
+    port: 49800,
+    txt: { v: '1', peerKey: Buffer.alloc(32, 7).toString('hex'), tc: '0' },
+    referer: { address: '192.168.1.11' }
+  }
+
+  await lan.ready()
+  const reachable = once(lan, 'peer-reachable')
+  adapter.discover(service)
+  await reachable
+  assert.equal(lan._knownPeers.size, 1)
+
+  const down = once(lan, 'peer-down')
+  adapter.down(service)
+  await down
+  assert.equal(lan._knownPeers.size, 0)
+
   await lan.destroy()
 })
 
