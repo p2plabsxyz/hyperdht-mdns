@@ -514,7 +514,7 @@ class HyperswarmLAN extends EventEmitter {
 
   async resume (opts) {
     if (!this.suspended || this.destroyed) return
-    
+
     try {
       const freshHost = selectLocalIPv4(undefined, this._allowLoopback)
       if (freshHost !== this.host) {
