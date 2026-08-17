@@ -93,7 +93,7 @@ test('adds a discovered endpoint and refreshes active topics', async () => {
   assert.equal(dht.nodes[0].host, '192.168.1.9')
   assert.equal(dht.pings.length, 1)
   assert.equal(dht.refreshes, 1)
-  assert.equal(swarm.discovery.refreshes, 2)
+  assert.equal(swarm.discovery.refreshes, 1)
 
   await lan.destroy()
 })
@@ -114,6 +114,17 @@ test('ignores its own mDNS record', async () => {
   await new Promise((resolve) => setImmediate(resolve))
 
   assert.equal(dht.nodes.length, 0)
+  await lan.destroy()
+})
+
+test('uses the fixed default port when no port is supplied', async () => {
+  const dht = new FakeDHT()
+  const keyPair = { publicKey: Buffer.alloc(32, 4) }
+  const swarm = new FakeSwarm(dht, keyPair)
+  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, adapter: new FakeAdapter() })
+
+  await lan.ready()
+  assert.equal(lan.port, HyperswarmLAN.DEFAULT_PORT)
   await lan.destroy()
 })
 
@@ -140,6 +151,43 @@ test('forgets a matching peer when the discovery adapter reports it down', async
   await down
   assert.equal(lan._knownPeers.size, 0)
 
+  await lan.destroy()
+})
+
+test('forgets a peer when an older service-down record has stale details', async () => {
+  const dht = new FakeDHT()
+  const keyPair = { publicKey: Buffer.alloc(32, 6) }
+  const swarm = new FakeSwarm(dht, keyPair)
+  const adapter = new FakeAdapter()
+  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
+  const service = {
+    port: 49800,
+    txt: { v: '1', peerKey: Buffer.alloc(32, 7).toString('hex'), tc: '0' },
+    referer: { address: '192.168.1.11' }
+  }
+
+  await lan.ready()
+  adapter.discover(service)
+  await once(lan, 'peer-reachable')
+  adapter.down({ ...service, port: 49801 })
+  assert.equal(lan._knownPeers.size, 0)
+  await lan.destroy()
+})
+
+test('does not destroy unmatched connections from a borrowed swarm', async () => {
+  const dht = new FakeDHT()
+  const keyPair = { publicKey: Buffer.alloc(32, 12) }
+  const swarm = new FakeSwarm(dht, keyPair)
+  const lan = new HyperswarmLAN({ host: '127.0.0.1', swarm, adapter: new FakeAdapter() })
+  const socket = {
+    remotePublicKey: Buffer.alloc(32, 13),
+    destroyed: false,
+    destroy () { this.destroyed = true }
+  }
+
+  await lan.ready()
+  lan._handleSwarmConnection(socket, { topics: [] })
+  assert.equal(socket.destroyed, false)
   await lan.destroy()
 })
 
@@ -180,7 +228,7 @@ test('join and session destroy update the advertised topic tokens', async () => 
   await lan.destroy()
 })
 
-test('resume re-detects host IP and clears stale peers on network change', async () => {
+test('resume reports an interface change instead of advertising an unbound address', async () => {
   const dht = new FakeDHT()
   const keyPair = { publicKey: Buffer.alloc(32, 8) }
   const swarm = new FakeSwarm(dht, keyPair)
@@ -204,14 +252,10 @@ test('resume re-detects host IP and clears stale peers on network change', async
   await lan.suspend()
   assert.equal(lan.suspended, true)
 
-  // Resume will call selectLocalIPv4(). If the result differs from the
-  // current this.host, stale peers are cleared. On the test machine the
-  // real system IP will differ from the hardcoded '192.168.1.50', so the
-  // branch that clears _knownPeers is exercised automatically.
-  await lan.resume()
-  assert.equal(lan.suspended, false)
-  assert.equal(lan._knownPeers.size, 0, 'stale peers from old network should be cleared')
-  assert.ok(lan.host, 'host should be set after resume')
+  lan._autoHost = true
+  await assert.rejects(lan.resume(), { code: 'ERR_LAN_INTERFACE_CHANGED' })
+  assert.equal(lan.suspended, true)
+  assert.equal(lan.host, '192.168.1.50')
 
   await lan.destroy()
 })

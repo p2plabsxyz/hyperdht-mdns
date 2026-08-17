@@ -10,7 +10,7 @@ test('creates and parses hashed topic tokens in a node-level mDNS record', () =>
   const advertised = createRecord({ peerKey, port: 49799, topics })
   const parsed = parseRecord(advertised)
 
-  assert.equal(advertised.type, 'hyperswarm-lan')
+  assert.equal(advertised.type, 'hyperdht-mdns')
   assert.equal(advertised.protocol, 'udp')
   assert.deepEqual(parsed, {
     peerKey,
@@ -18,6 +18,16 @@ test('creates and parses hashed topic tokens in a node-level mDNS record', () =>
     tokens: topics.map(topicToken).sort()
   })
   assert.equal(advertised.txt.t0.includes(topics[0].toString('hex')), false)
+})
+
+test('caps TXT records below the multicast packet budget', () => {
+  assert.throws(() => {
+    createRecord({
+      peerKey: Buffer.alloc(32, 1),
+      port: 49799,
+      topics: Array.from({ length: 32 }, (_, index) => Buffer.alloc(32, index))
+    })
+  }, /TXT record exceeds/)
 })
 
 test('rejects unsupported or malformed records', () => {

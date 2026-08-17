@@ -5,7 +5,7 @@ HyperDHT.
 
 Experimental offline LAN discovery for Hyperswarm and Corestore applications.
 Each process runs a separate, bootstrap-free HyperDHT and advertises one mDNS
-service (`_hyperswarm-lan._udp`). mDNS exchanges node endpoints and hashed topic
+service (`_hyperdht-mdns._udp`). mDNS exchanges node endpoints and hashed topic
 tokens. Nodes make one authenticated, encrypted connection only when they share
 a joined topic; Corestore multiplexes shared cores over that stream. Isolated
 Hyperswarm topic joins also remain active for normal DHT discovery as the LAN
@@ -95,6 +95,11 @@ lanSwarm.join(topic)
   `bonjour-service` package. Mobile applications can inject a system Bonjour or
   Android NSD implementation without changing any HyperDHT logic.
 
+The instance owns its DHT and swarm by default. Supplying `swarm` (and optionally
+`dht`) is intended for advanced adapters and leaves unmatched connections alone.
+An owned DHT is bound to the selected `host`; after Wi-Fi, cellular, or sleep/wake
+interface changes, destroy and recreate the instance before resuming discovery.
+
 An adapter has this shape; either method may also return its handle in a
 Promise:
 
@@ -137,9 +142,10 @@ One service is published per process:
 }
 ```
 
-Each token is `SHA256("hyperswarm-lan:" + topic)` encoded as unpadded base64url.
+Each token is `SHA256("hyperdht-mdns:" + topic)` encoded as unpadded base64url.
 Raw discovery keys are never advertised. TXT values are chunked below the DNS
-255-byte string limit, and one node may advertise up to 32 active topics.
+255-byte string limit, and the aggregate TXT payload is capped at 900 bytes to
+avoid fragmented multicast packets on typical Wi-Fi networks.
 
 Two-node DHTs have a storage symmetry problem: each node stores its announcement
 on the other node, then queries that other node and sees only its own record.
@@ -155,6 +161,11 @@ third routing node. Nodes with no shared topic do not connect.
   enable client isolation and will prevent both discovery and direct traffic.
 - Run one instance per UDP port on a device. Configure another fixed port when
   running multiple processes on the same host.
+- A port conflict reports the configured port; choose a different fixed port
+  before starting another local instance.
+- If multiple IPv4 interfaces are active (for example VPN, Docker, Ethernet, and
+  Wi-Fi), pass `host` explicitly. The DHT binds one interface while mDNS may
+  advertise on several.
 
 The current default mDNS implementation is pure JavaScript and uses socket
 reuse on port 5353. The adapter boundary exists because native system-daemon

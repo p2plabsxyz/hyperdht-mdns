@@ -26,9 +26,11 @@ class HyperswarmLAN extends EventEmitter {
     this.destroyed = false
     this.suspended = false
     this._allowLoopback = opts.allowLoopback === true
+    this._autoHost = !opts.host
     this.host = opts.host || selectLocalIPv4(undefined, this._allowLoopback)
     this.port = opts.port === undefined ? DEFAULT_PORT : opts.port
-    this._destroySwarm = opts.destroySwarm !== false
+    this._ownsSwarm = !opts.swarm
+    this._destroySwarm = this._ownsSwarm && opts.destroySwarm !== false
     this._direct = opts.eager !== false
     this._joinedTopics = new Map()
     this._knownPeers = new Map()
@@ -95,7 +97,17 @@ class HyperswarmLAN extends EventEmitter {
   }
 
   async _open () {
-    await this.dht.fullyBootstrapped()
+    try {
+      await this.dht.fullyBootstrapped()
+    } catch (cause) {
+      if (cause?.code === 'EADDRINUSE') {
+        throw new Error(
+          `LAN DHT port ${this.port} is already in use. Choose a different fixed port for another local instance.`,
+          { cause }
+        )
+      }
+      throw cause
+    }
     if (this.destroyed) return
 
     await this.swarm.listen()
@@ -184,6 +196,12 @@ class HyperswarmLAN extends EventEmitter {
         throw new RangeError(`Cannot join more than ${MAX_ADVERTISED_TOPICS} LAN topics`)
       }
       this._joinedTopics.set(id, { topic: Buffer.from(topic), refs: 1 })
+      try {
+        this._createRecord()
+      } catch (error) {
+        this._joinedTopics.delete(id)
+        throw error
+      }
     }
 
     this._topicsChanged()
@@ -315,7 +333,6 @@ class HyperswarmLAN extends EventEmitter {
 
       const discoveries = [...this.swarm.topics()]
       await refreshAll(discoveries)
-      await refreshAll(discoveries)
     }
 
     if (this._direct && matchedTopics.length > 0) this._connectDirect(peer, matchedTopics)
@@ -324,14 +341,11 @@ class HyperswarmLAN extends EventEmitter {
 
   _handleServiceDown (service) {
     const record = parseRecord(service)
-    const host = serviceIPv4(service)
-    if (!record || !host || record.peerKey.equals(this.keyPair.publicKey)) return
+    if (!record || record.peerKey.equals(this.keyPair.publicKey)) return
 
     const id = record.peerKey.toString('hex')
     const peer = this._knownPeers.get(id)
     if (!peer) return
-    if (peer.host !== host || peer.port !== record.port || !sameTokens(peer.tokens, record.tokens)) return
-
     this._knownPeers.delete(id)
     this._peerTopics.delete(id)
     this._cancelReconnect(id)
@@ -360,7 +374,10 @@ class HyperswarmLAN extends EventEmitter {
 
   _handleSwarmConnection (socket, peerInfo) {
     const publicKey = socket.remotePublicKey || peerInfo.publicKey
-    if (!publicKey) return socket.destroy()
+    if (!publicKey) {
+      if (this._ownsSwarm) socket.destroy()
+      return
+    }
 
     const id = publicKey.toString('hex')
     const discoveredTopics = Array.isArray(peerInfo.topics) ? peerInfo.topics : []
@@ -368,7 +385,10 @@ class HyperswarmLAN extends EventEmitter {
       ? discoveredTopics.filter(topic => this._joinedTopics.has(topic.toString('hex')))
       : (this._peerTopics.get(id) || [])
 
-    if (topics.length === 0) return socket.destroy()
+    if (topics.length === 0) {
+      if (this._ownsSwarm) socket.destroy()
+      return
+    }
 
     this._emitConnection(socket, {
       ...peerInfo,
@@ -387,8 +407,7 @@ class HyperswarmLAN extends EventEmitter {
     const relayAddresses = [{ host: peer.host, port: peer.port }]
     const socket = this.dht.connect(peer.publicKey, {
       keyPair: this.keyPair,
-      relayAddresses,
-      localConnection: true
+      relayAddresses
     })
     this._directConnections.set(id, socket)
 
@@ -515,15 +534,22 @@ class HyperswarmLAN extends EventEmitter {
   async resume (opts) {
     if (!this.suspended || this.destroyed) return
 
-    try {
-      const freshHost = selectLocalIPv4(undefined, this._allowLoopback)
-      if (freshHost !== this.host) {
-        this.host = freshHost
-        this._knownPeers.clear()
-        this._peerTopics.clear()
+    let freshHost = this.host
+    if (this._autoHost) {
+      try {
+        freshHost = selectLocalIPv4(undefined, this._allowLoopback)
+      } catch (error) {
+        this.emit('warning', error)
       }
-    } catch (error) {
-      this.emit('warning', error)
+    }
+
+    if (freshHost && freshHost !== this.host) {
+      const error = new Error(
+        `The LAN interface changed from ${this.host} to ${freshHost}; recreate the LAN DHT instance to bind the new address.`
+      )
+      error.code = 'ERR_LAN_INTERFACE_CHANGED'
+      if (this.listenerCount('error') > 0) this.emit('error', error)
+      throw error
     }
 
     await this.swarm.resume(opts)
@@ -638,10 +664,6 @@ function visiblePeer (peer, topics) {
   delete visible.lastSignature
   delete visible.lastSeen
   return visible
-}
-
-function sameTokens (a, b) {
-  return a.length === b.length && a.every((token, index) => token === b[index])
 }
 
 function refreshAll (discoveries) {

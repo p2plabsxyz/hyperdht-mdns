@@ -2,12 +2,13 @@
 
 const { createHash } = require('crypto')
 
-const SERVICE_TYPE = 'hyperswarm-lan'
+const SERVICE_TYPE = 'hyperdht-mdns'
 const SERVICE_PROTOCOL = 'udp'
 const PROTOCOL_VERSION = 1
-const TOPIC_PREFIX = Buffer.from('hyperswarm-lan:')
+const TOPIC_PREFIX = Buffer.from('hyperdht-mdns:')
 const TOPICS_PER_TXT_ENTRY = 5
 const MAX_ADVERTISED_TOPICS = 32
+const MAX_TXT_BYTES = 900
 
 function createRecord ({ peerKey, port, topics = [] }) {
   if (!Buffer.isBuffer(peerKey) || peerKey.byteLength !== 32) {
@@ -33,6 +34,10 @@ function createRecord ({ peerKey, port, topics = [] }) {
     txt[`t${i / TOPICS_PER_TXT_ENTRY}`] = tokens
       .slice(i, i + TOPICS_PER_TXT_ENTRY)
       .join(',')
+  }
+
+  if (encodedTXTSize(txt) > MAX_TXT_BYTES) {
+    throw new RangeError(`LAN mDNS TXT record exceeds ${MAX_TXT_BYTES} bytes; reduce joined topics`)
   }
 
   return {
@@ -100,9 +105,16 @@ function toString (value) {
   return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
 }
 
+function encodedTXTSize (txt) {
+  return Object.entries(txt).reduce((size, [key, value]) => {
+    return size + Buffer.byteLength(key) + Buffer.byteLength(String(value)) + 2
+  }, 0)
+}
+
 module.exports = {
   PROTOCOL_VERSION,
   MAX_ADVERTISED_TOPICS,
+  MAX_TXT_BYTES,
   SERVICE_PROTOCOL,
   SERVICE_TYPE,
   createRecord,
