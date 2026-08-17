@@ -19,7 +19,7 @@ const PEER_REFRESH_INTERVAL = 30_000
 const RECONNECT_INITIAL_DELAY = 250
 const RECONNECT_MAX_DELAY = 30_000
 
-class HyperswarmLAN extends EventEmitter {
+class HyperDHTmDNS extends EventEmitter {
   constructor (opts = {}) {
     super()
 
@@ -559,6 +559,7 @@ class HyperswarmLAN extends EventEmitter {
       await this._startDiscovery(record)
     } catch (error) {
       this.suspended = true
+      await this.swarm.suspend(opts).catch(() => {})
       throw error
     }
     this._advertisedSignature = recordSignature(record)
@@ -628,10 +629,10 @@ class HyperswarmLAN extends EventEmitter {
   }
 }
 
-HyperswarmLAN.DEFAULT_PORT = DEFAULT_PORT
-HyperswarmLAN.MAX_ADVERTISED_TOPICS = MAX_ADVERTISED_TOPICS
+HyperDHTmDNS.DEFAULT_PORT = DEFAULT_PORT
+HyperDHTmDNS.MAX_ADVERTISED_TOPICS = MAX_ADVERTISED_TOPICS
 
-module.exports = HyperswarmLAN
+module.exports = HyperDHTmDNS
 
 function assertTopic (topic) {
   if (!Buffer.isBuffer(topic) || topic.byteLength !== 32) {

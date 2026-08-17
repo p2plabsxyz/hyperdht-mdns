@@ -14,7 +14,7 @@
   },
   "scripts": {
     "demo:lan": "node examples/three-box-chat.js",
-    "test": "node --test",
+    "test": "node --test --test-concurrency=1",
     "test:mdns": "node test-utils/bonjour-smoke.js",
     "lint": "standard"
   },

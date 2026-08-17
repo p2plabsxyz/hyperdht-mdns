@@ -7,19 +7,19 @@ const { tmpdir } = require('os')
 const path = require('path')
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const HyperswarmLAN = require('..')
-const { attachHyperSDK } = HyperswarmLAN
+const HyperDHTmDNS = require('..')
+const { attachHyperSDK } = HyperDHTmDNS
 const MemoryAdapter = require('../test-utils/memory-adapter')
 
 test('two bootstrap-free swarms discover a shared topic through injected LAN nodes', { timeout: 30_000 }, async (t) => {
   const bus = new Set()
-  const a = new HyperswarmLAN({
+  const a = new HyperDHTmDNS({
     host: '127.0.0.1',
     port: 49831,
     allowLoopback: true,
     adapter: new MemoryAdapter(bus)
   })
-  const b = new HyperswarmLAN({
+  const b = new HyperDHTmDNS({
     host: '127.0.0.1',
     port: 49832,
     allowLoopback: true,
@@ -50,13 +50,13 @@ test('two bootstrap-free swarms discover a shared topic through injected LAN nod
 
 test('reconnects a known shared-topic peer after repeated socket loss', { timeout: 30_000 }, async (t) => {
   const bus = new Set()
-  const a = new HyperswarmLAN({
+  const a = new HyperDHTmDNS({
     host: '127.0.0.1',
     port: 49841,
     allowLoopback: true,
     adapter: new MemoryAdapter(bus)
   })
-  const b = new HyperswarmLAN({
+  const b = new HyperDHTmDNS({
     host: '127.0.0.1',
     port: 49842,
     allowLoopback: true,
@@ -97,13 +97,13 @@ test('reconnects a known shared-topic peer after repeated socket loss', { timeou
 
 test('rediscovers a shared-topic peer after repeated suspend and resume cycles', { timeout: 30_000 }, async (t) => {
   const bus = new Set()
-  const a = new HyperswarmLAN({
+  const a = new HyperDHTmDNS({
     host: '127.0.0.1',
     port: 49843,
     allowLoopback: true,
     adapter: new MemoryAdapter(bus)
   })
-  const b = new HyperswarmLAN({
+  const b = new HyperDHTmDNS({
     host: '127.0.0.1',
     port: 49844,
     allowLoopback: true,
@@ -136,13 +136,13 @@ test('rediscovers a shared-topic peer after repeated suspend and resume cycles',
 })
 test('nodes on different topics discover DHT endpoints but do not connect', { timeout: 10_000 }, async (t) => {
   const bus = new Set()
-  const a = new HyperswarmLAN({
+  const a = new HyperDHTmDNS({
     host: '127.0.0.1',
     port: 49833,
     allowLoopback: true,
     adapter: new MemoryAdapter(bus)
   })
-  const b = new HyperswarmLAN({
+  const b = new HyperDHTmDNS({
     host: '127.0.0.1',
     port: 49834,
     allowLoopback: true,
@@ -165,13 +165,13 @@ test('nodes on different topics discover DHT endpoints but do not connect', { ti
 })
 test('joining a shared topic after discovery triggers a matched connection', { timeout: 15_000 }, async (t) => {
   const bus = new Set()
-  const a = new HyperswarmLAN({
+  const a = new HyperDHTmDNS({
     host: '127.0.0.1',
     port: 49835,
     allowLoopback: true,
     adapter: new MemoryAdapter(bus)
   })
-  const b = new HyperswarmLAN({
+  const b = new HyperDHTmDNS({
     host: '127.0.0.1',
     port: 49836,
     allowLoopback: true,

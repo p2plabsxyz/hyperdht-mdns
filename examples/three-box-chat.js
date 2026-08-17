@@ -5,7 +5,7 @@ const { createHash } = require('crypto')
 const readline = require('readline')
 const c = require('compact-encoding')
 const Protomux = require('protomux')
-const HyperswarmLAN = require('..')
+const HyperDHTmDNS = require('..')
 
 const CHAT_PROTOCOL = 'hyperdht-mdns/three-box-chat/1'
 
@@ -16,7 +16,7 @@ async function main () {
   const room = options.room || 'hyperdht-mdns-test'
   const name = options.name || process.env.COMPUTERNAME || process.env.HOSTNAME || 'anonymous'
   const topic = createHash('sha256').update(`hyperdht-mdns-chat:${room}`).digest()
-  const lan = new HyperswarmLAN({
+  const lan = new HyperDHTmDNS({
     ...(options.host ? { host: options.host } : {}),
     ...(options.port ? { port: options.port } : {})
   })

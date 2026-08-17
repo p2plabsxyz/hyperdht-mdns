@@ -41,7 +41,7 @@ function createRecord ({ peerKey, port, topics = [] }) {
   }
 
   return {
-    name: `hyperswarm-lan-${peerKeyHex.slice(0, 12)}`,
+    name: `hyperdht-mdns-${peerKeyHex.slice(0, 12)}`,
     type: SERVICE_TYPE,
     protocol: SERVICE_PROTOCOL,
     port,

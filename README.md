@@ -164,8 +164,10 @@ third routing node. Nodes with no shared topic do not connect.
 - A port conflict reports the configured port; choose a different fixed port
   before starting another local instance.
 - If multiple IPv4 interfaces are active (for example VPN, Docker, Ethernet, and
-  Wi-Fi), pass `host` explicitly. The DHT binds one interface while mDNS may
-  advertise on several.
+  Wi-Fi), pass `host` explicitly. The automatic selection prefers `192.168.*` over
+  `10.*` over `172.16-31.*`; a corporate VPN on `10.*` can win over the actual
+  local network. The DHT binds one interface while mDNS may advertise on several,
+  so peers on other subnets will discover the node but fail to reach its DHT.
 
 The current default mDNS implementation is pure JavaScript and uses socket
 reuse on port 5353. The adapter boundary exists because native system-daemon

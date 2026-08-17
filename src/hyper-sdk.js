@@ -1,15 +1,15 @@
 'use strict'
 
-const HyperswarmLAN = require('./hyperswarm-lan')
+const HyperDHTmDNS = require('./hyperswarm-lan')
 
-const ATTACHED = Symbol.for('hyperswarm-lan.hyper-sdk')
+const ATTACHED = Symbol.for('hyperdht-mdns.hyper-sdk')
 
 async function attachHyperSDK (sdk, opts = {}) {
   assertSDK(sdk)
   if (sdk[ATTACHED]) return sdk[ATTACHED]
 
   const { lan: suppliedLAN, lanOnly = false, ...lanOpts } = opts
-  const lan = suppliedLAN || new HyperswarmLAN({
+  const lan = suppliedLAN || new HyperDHTmDNS({
     ...lanOpts,
     keyPair: sdk.swarm.keyPair
   })
@@ -56,15 +56,13 @@ async function attachHyperSDK (sdk, opts = {}) {
     throwFirstRejection(results)
   }
 
-  sdk.ready = () => Promise.all([original.ready(), lan.ready()])
-  sdk.suspend = (suspendOpts) => Promise.all([
-    original.suspend(suspendOpts),
-    lan.suspend(suspendOpts)
-  ])
-  sdk.resume = (resumeOpts) => Promise.all([
-    original.resume(resumeOpts),
-    lan.resume(resumeOpts)
-  ])
+  sdk.ready = async () => { await Promise.all([original.ready(), lan.ready()]) }
+  sdk.suspend = async (suspendOpts) => {
+    await Promise.all([original.suspend(suspendOpts), lan.suspend(suspendOpts)])
+  }
+  sdk.resume = async (resumeOpts) => {
+    await Promise.all([original.resume(resumeOpts), lan.resume(resumeOpts)])
+  }
 
   sdk.swarm.flush = (...args) => {
     // Public DHT failure must not block a LAN-only application. The global

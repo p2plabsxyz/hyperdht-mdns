@@ -17,7 +17,7 @@ test('creates and parses hashed topic tokens in a node-level mDNS record', () =>
     port: 49799,
     tokens: topics.map(topicToken).sort()
   })
-  assert.equal(advertised.txt.t0.includes(topics[0].toString('hex')), false)
+  assert.equal(JSON.stringify(advertised.txt).includes(topics[0].toString('hex')), false)
 })
 
 test('caps TXT records below the multicast packet budget', () => {

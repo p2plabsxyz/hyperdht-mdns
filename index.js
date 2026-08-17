@@ -1,9 +1,9 @@
 'use strict'
 
-const HyperswarmLAN = require('./src/hyperswarm-lan')
+const HyperDHTmDNS = require('./src/hyperswarm-lan')
 
-module.exports = HyperswarmLAN
-module.exports.HyperswarmLAN = HyperswarmLAN
+module.exports = HyperDHTmDNS
+module.exports.HyperDHTmDNS = HyperDHTmDNS
 module.exports.BonjourAdapter = require('./src/bonjour-adapter')
 module.exports.SERVICE_TYPE = require('./src/record').SERVICE_TYPE
 module.exports.topicToken = require('./src/record').topicToken

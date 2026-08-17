@@ -3,7 +3,7 @@
 const { EventEmitter, once } = require('events')
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const HyperswarmLAN = require('..')
+const HyperDHTmDNS = require('..')
 
 class FakeDHT {
   constructor () {
@@ -69,7 +69,7 @@ test('adds a discovered endpoint and refreshes active topics', async () => {
   const keyPair = { publicKey: Buffer.alloc(32, 1) }
   const swarm = new FakeSwarm(dht, keyPair)
   const adapter = new FakeAdapter()
-  const lan = new HyperswarmLAN({
+  const lan = new HyperDHTmDNS({
     host: '127.0.0.1',
     port: 49799,
     dht,
@@ -103,7 +103,7 @@ test('ignores its own mDNS record', async () => {
   const keyPair = { publicKey: Buffer.alloc(32, 3) }
   const swarm = new FakeSwarm(dht, keyPair)
   const adapter = new FakeAdapter()
-  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
+  const lan = new HyperDHTmDNS({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
 
   await lan.ready()
   adapter.discover({
@@ -121,10 +121,28 @@ test('uses the fixed default port when no port is supplied', async () => {
   const dht = new FakeDHT()
   const keyPair = { publicKey: Buffer.alloc(32, 4) }
   const swarm = new FakeSwarm(dht, keyPair)
-  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, adapter: new FakeAdapter() })
+  const lan = new HyperDHTmDNS({ host: '127.0.0.1', dht, swarm, adapter: new FakeAdapter() })
 
   await lan.ready()
-  assert.equal(lan.port, HyperswarmLAN.DEFAULT_PORT)
+  assert.equal(lan.port, HyperDHTmDNS.DEFAULT_PORT)
+  await lan.destroy()
+})
+
+test('wraps EADDRINUSE with a descriptive error on the default constructor path', async () => {
+  const eaddrinuse = new Error('bind EADDRINUSE 0.0.0.0:49799')
+  eaddrinuse.code = 'EADDRINUSE'
+  const dht = new FakeDHT()
+  dht.fullyBootstrapped = () => Promise.reject(eaddrinuse)
+  const keyPair = { publicKey: Buffer.alloc(32, 14) }
+  const swarm = new FakeSwarm(dht, keyPair)
+  const lan = new HyperDHTmDNS({ host: '127.0.0.1', dht, swarm, adapter: new FakeAdapter() })
+
+  await assert.rejects(lan.ready(), (error) => {
+    assert.match(error.message, /LAN DHT port/)
+    assert.match(error.message, /49799/)
+    assert.equal(error.cause, eaddrinuse)
+    return true
+  })
   await lan.destroy()
 })
 
@@ -133,7 +151,7 @@ test('forgets a matching peer when the discovery adapter reports it down', async
   const keyPair = { publicKey: Buffer.alloc(32, 6) }
   const swarm = new FakeSwarm(dht, keyPair)
   const adapter = new FakeAdapter()
-  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
+  const lan = new HyperDHTmDNS({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
   const service = {
     port: 49800,
     txt: { v: '1', peerKey: Buffer.alloc(32, 7).toString('hex'), tc: '0' },
@@ -159,7 +177,7 @@ test('forgets a peer when an older service-down record has stale details', async
   const keyPair = { publicKey: Buffer.alloc(32, 6) }
   const swarm = new FakeSwarm(dht, keyPair)
   const adapter = new FakeAdapter()
-  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
+  const lan = new HyperDHTmDNS({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
   const service = {
     port: 49800,
     txt: { v: '1', peerKey: Buffer.alloc(32, 7).toString('hex'), tc: '0' },
@@ -178,7 +196,7 @@ test('does not destroy unmatched connections from a borrowed swarm', async () =>
   const dht = new FakeDHT()
   const keyPair = { publicKey: Buffer.alloc(32, 12) }
   const swarm = new FakeSwarm(dht, keyPair)
-  const lan = new HyperswarmLAN({ host: '127.0.0.1', swarm, adapter: new FakeAdapter() })
+  const lan = new HyperDHTmDNS({ host: '127.0.0.1', swarm, adapter: new FakeAdapter() })
   const socket = {
     remotePublicKey: Buffer.alloc(32, 13),
     destroyed: false,
@@ -200,7 +218,7 @@ test('can be destroyed while startup is in progress', async () => {
 
   dht.fullyBootstrapped = () => new Promise((resolve) => { release = resolve })
 
-  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
+  const lan = new HyperDHTmDNS({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
   const destroying = lan.destroy()
   release()
   await destroying
@@ -214,7 +232,7 @@ test('join and session destroy update the advertised topic tokens', async () => 
   const keyPair = { publicKey: Buffer.alloc(32, 5) }
   const swarm = new FakeSwarm(dht, keyPair)
   const adapter = new FakeAdapter()
-  const lan = new HyperswarmLAN({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
+  const lan = new HyperDHTmDNS({ host: '127.0.0.1', dht, swarm, adapter, eager: false })
 
   await lan.ready()
   const session = lan.join(Buffer.alloc(32, 12))
@@ -233,7 +251,7 @@ test('resume reports an interface change instead of advertising an unbound addre
   const keyPair = { publicKey: Buffer.alloc(32, 8) }
   const swarm = new FakeSwarm(dht, keyPair)
   const adapter = new FakeAdapter()
-  const lan = new HyperswarmLAN({ host: '192.168.1.50', dht, swarm, adapter, eager: false })
+  const lan = new HyperDHTmDNS({ host: '192.168.1.50', dht, swarm, adapter, eager: false })
 
   await lan.ready()
 
