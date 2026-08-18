@@ -16,7 +16,8 @@
     "demo:lan": "node examples/three-box-chat.js",
     "test": "node --test --test-concurrency=1",
     "test:mdns": "node test-utils/bonjour-smoke.js",
-    "lint": "standard"
+    "lint": "standard",
+    "benchmark": "node test/benchmark.js"
   },
   "keywords": [
     "hyperswarm",

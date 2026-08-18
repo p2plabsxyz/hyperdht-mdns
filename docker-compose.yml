@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  node1:
+    build: .
+    environment:
+      - NODE_NAME=node1
+      - EXPECTED_PEERS=3
+    command: node test/offline-nodes.js
+    networks:
+      offline_net:
+
+  node2:
+    build: .
+    environment:
+      - NODE_NAME=node2
+      - EXPECTED_PEERS=3
+    command: node test/offline-nodes.js
+    networks:
+      offline_net:
+
+  node3:
+    build: .
+    environment:
+      - NODE_NAME=node3
+      - EXPECTED_PEERS=3
+    command: node test/offline-nodes.js
+    networks:
+      offline_net:
+
+  node4:
+    build: .
+    environment:
+      - NODE_NAME=node4
+      - EXPECTED_PEERS=3
+    command: node test/offline-nodes.js
+    networks:
+      offline_net:
+
+networks:
+  offline_net:
+    driver: bridge
+    internal: true # Simulates complete offline mode (no internet)
