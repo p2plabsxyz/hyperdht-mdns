@@ -6,7 +6,10 @@ const ATTACHED = Symbol.for('hyperdht-mdns.hyper-sdk')
 
 async function attachHyperSDK (sdk, opts = {}) {
   assertSDK(sdk)
-  if (sdk[ATTACHED]) return sdk[ATTACHED]
+  if (sdk[ATTACHED] && !sdk[ATTACHED].destroyed) return sdk[ATTACHED]
+
+  const isReattach = !!sdk[ATTACHED]
+  const previousTopics = isReattach ? sdk[ATTACHED].topics() : []
 
   const { lan: suppliedLAN, lanOnly = false, ...lanOpts } = opts
   const lan = suppliedLAN || new HyperDHTmDNS({
@@ -16,14 +19,75 @@ async function attachHyperSDK (sdk, opts = {}) {
   sdk[ATTACHED] = lan
   sdk.localSwarm = lan
 
-  const original = {
-    close: sdk.close.bind(sdk),
-    join: sdk.join.bind(sdk),
-    leave: sdk.leave.bind(sdk),
-    ready: sdk.ready.bind(sdk),
-    resume: sdk.resume.bind(sdk),
-    suspend: sdk.suspend.bind(sdk),
-    flush: sdk.swarm.flush.bind(sdk.swarm)
+  if (!isReattach) {
+    const original = {
+      close: sdk.close.bind(sdk),
+      join: sdk.join.bind(sdk),
+      leave: sdk.leave.bind(sdk),
+      ready: sdk.ready.bind(sdk),
+      resume: sdk.resume.bind(sdk),
+      suspend: sdk.suspend.bind(sdk),
+      flush: sdk.swarm.flush.bind(sdk.swarm)
+    }
+
+    sdk.join = (topic, joinOpts) => {
+      const localTopic = normalizeTopic(sdk, topic)
+      const globalSession = original.join(topic, joinOpts)
+      let localSession
+
+      try {
+        localSession = sdk[ATTACHED].join(localTopic, joinOpts)
+      } catch (error) {
+        globalSession.destroy().catch(() => {})
+        throw error
+      }
+
+      return new CombinedDiscovery(globalSession, localSession)
+    }
+
+    sdk.leave = async (topic) => {
+      const localTopic = normalizeTopic(sdk, topic)
+      const results = await Promise.allSettled([
+        original.leave(topic),
+        sdk[ATTACHED].leave(localTopic)
+      ])
+      throwFirstRejection(results)
+    }
+
+    sdk.ready = async () => { await Promise.all([original.ready(), sdk[ATTACHED].ready()]) }
+    sdk.suspend = async (suspendOpts) => {
+      await Promise.all([original.suspend(suspendOpts), sdk[ATTACHED].suspend(suspendOpts)])
+    }
+    sdk.resume = async (resumeOpts) => {
+      await Promise.all([original.resume(resumeOpts), sdk[ATTACHED].resume(resumeOpts)])
+    }
+
+    sdk.swarm.flush = (...args) => {
+      // Public DHT failure must not block a LAN-only application. The global
+      // flush continues in the background when internet access is unavailable.
+      original.flush(...args).catch(() => {})
+      return sdk[ATTACHED].flush()
+    }
+
+    let isLANOnly = false
+    sdk.setLANOnly = async (enabled = true) => {
+      enabled = !!enabled
+      if (enabled === isLANOnly) return
+      if (enabled) await sdk.swarm.suspend()
+      else await sdk.swarm.resume()
+      isLANOnly = enabled
+    }
+
+    let closing = null
+    sdk.close = () => {
+      if (!closing) {
+        closing = sdk[ATTACHED].destroy().then(
+          () => original.close(),
+          () => original.close()
+        )
+      }
+      return closing
+    }
   }
 
   lan.on('connection', (socket, peerInfo) => {
@@ -32,67 +96,12 @@ async function attachHyperSDK (sdk, opts = {}) {
     sdk.swarm.emit('connection', socket, peerInfo)
   })
 
-  sdk.join = (topic, joinOpts) => {
-    const localTopic = normalizeTopic(sdk, topic)
-    const globalSession = original.join(topic, joinOpts)
-    let localSession
-
-    try {
-      localSession = lan.join(localTopic, joinOpts)
-    } catch (error) {
-      globalSession.destroy().catch(() => {})
-      throw error
-    }
-
-    return new CombinedDiscovery(globalSession, localSession)
-  }
-
-  sdk.leave = async (topic) => {
-    const localTopic = normalizeTopic(sdk, topic)
-    const results = await Promise.allSettled([
-      original.leave(topic),
-      lan.leave(localTopic)
-    ])
-    throwFirstRejection(results)
-  }
-
-  sdk.ready = async () => { await Promise.all([original.ready(), lan.ready()]) }
-  sdk.suspend = async (suspendOpts) => {
-    await Promise.all([original.suspend(suspendOpts), lan.suspend(suspendOpts)])
-  }
-  sdk.resume = async (resumeOpts) => {
-    await Promise.all([original.resume(resumeOpts), lan.resume(resumeOpts)])
-  }
-
-  sdk.swarm.flush = (...args) => {
-    // Public DHT failure must not block a LAN-only application. The global
-    // flush continues in the background when internet access is unavailable.
-    original.flush(...args).catch(() => {})
-    return lan.flush()
-  }
-
-  let isLANOnly = false
-  sdk.setLANOnly = async (enabled = true) => {
-    enabled = !!enabled
-    if (enabled === isLANOnly) return
-    if (enabled) await sdk.swarm.suspend()
-    else await sdk.swarm.resume()
-    isLANOnly = enabled
-  }
-
-  let closing = null
-  sdk.close = () => {
-    if (!closing) {
-      closing = lan.destroy().then(
-        () => original.close(),
-        () => original.close()
-      )
-    }
-    return closing
+  for (const topic of previousTopics) {
+    lan.join(topic).catch(() => {})
   }
 
   await lan.ready()
-  if (lanOnly) await sdk.setLANOnly(true)
+  if (lanOnly && !isReattach) await sdk.setLANOnly(true)
   return lan
 }
 
