@@ -23,7 +23,7 @@ async function main () {
     if (isServer) {
       clientsConnected++
       socket.pipe(socket)
-      
+
       if (clientsConnected >= expectedClients) {
         setTimeout(() => {
           console.log('Server shutting down.')
@@ -82,7 +82,7 @@ async function main () {
           const avg = latencies.reduce((a, b) => a + b, 0) / latencies.length
           const min = Math.min(...latencies)
           const max = Math.max(...latencies)
-          
+
           console.log('\nLatency Benchmark')
           console.log(`Pings: ${pings}`)
           console.log(`Average RTT: ${avg.toFixed(2)} ms`)
@@ -92,7 +92,7 @@ async function main () {
         }
       })
 
-      function sendPing() {
+      function sendPing () {
         lastSend = Date.now()
         socket.write(Buffer.from('ping'))
       }
