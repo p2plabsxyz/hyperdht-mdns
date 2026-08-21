@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  node1:
+    build: .
+    network_mode: "host"
+    environment:
+      - NODE_NAME=node1
+      - EXPECTED_PEERS=3
+      - PORT=49991
+    command: node test/offline-nodes.js
+
+  node2:
+    build: .
+    network_mode: "host"
+    environment:
+      - NODE_NAME=node2
+      - EXPECTED_PEERS=3
+      - PORT=49992
+    command: node test/offline-nodes.js
+    depends_on:
+      - node1
+
+  node3:
+    build: .
+    network_mode: "host"
+    environment:
+      - NODE_NAME=node3
+      - EXPECTED_PEERS=3
+      - PORT=49993
+    command: node test/offline-nodes.js
+    depends_on:
+      - node1
+
+  node4:
+    build: .
+    network_mode: "host"
+    environment:
+      - NODE_NAME=node4
+      - EXPECTED_PEERS=3
+      - PORT=49994
+    command: node test/offline-nodes.js
+    depends_on:
+      - node1

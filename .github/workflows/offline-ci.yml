@@ -1,0 +1,21 @@
+name: Offline LAN Benchmark Test
+
+on:
+  push:
+    branches: [ main, feature/* ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  offline-benchmark:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker images
+        run: docker compose build
+
+      - name: Run offline discovery test in Docker network
+        run: docker compose up --abort-on-container-exit --exit-code-from node1

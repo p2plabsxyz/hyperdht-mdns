@@ -1,0 +1,76 @@
+name: Benchmark Test
+
+on:
+  push:
+    branches: [ main, feature/* ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run throughput benchmark
+        run: |
+          # Start the server in the background
+          EXPECTED_CLIENTS=1 ROLE=server PORT=49991 node test/benchmark.js &
+          SERVER_PID=$!
+          
+          # Wait briefly for the server to be ready
+          sleep 2
+          
+          # Run the throughput client
+          ROLE=throughput PORT=49992 node test/benchmark.js
+          
+          # Clean up the server process
+          kill $SERVER_PID || true
+
+      - name: Run latency benchmark
+        run: |
+          # Start the server in the background
+          EXPECTED_CLIENTS=1 ROLE=server PORT=49991 node test/benchmark.js &
+          SERVER_PID=$!
+          
+          # Wait briefly for the server to be ready
+          sleep 2
+          
+          # Run the latency client
+          ROLE=latency PORT=49992 node test/benchmark.js
+          
+          # Clean up the server process
+          kill $SERVER_PID || true
+
+      - name: Run multi-node throughput benchmark (3 clients)
+        run: |
+          # Start the server expecting 3 clients
+          EXPECTED_CLIENTS=3 ROLE=server PORT=49991 node test/benchmark.js &
+          SERVER_PID=$!
+          
+          # Wait briefly for the server to be ready
+          sleep 2
+          
+          # Run 3 throughput clients concurrently
+          ROLE=throughput PORT=49992 node test/benchmark.js &
+          C1=$!
+          ROLE=throughput PORT=49993 node test/benchmark.js &
+          C2=$!
+          ROLE=throughput PORT=49994 node test/benchmark.js &
+          C3=$!
+          
+          # Wait for all clients to finish
+          wait $C1 $C2 $C3
+          
+          # Clean up the server process
+          kill $SERVER_PID || true
