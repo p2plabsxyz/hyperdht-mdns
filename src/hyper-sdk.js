@@ -3,13 +3,14 @@
 const HyperDHTmDNS = require('./hyperswarm-lan')
 
 const ATTACHED = Symbol.for('hyperdht-mdns.hyper-sdk')
+const ATTACHMENT_STATE = Symbol.for('hyperdht-mdns.hyper-sdk.state')
 
 async function attachHyperSDK (sdk, opts = {}) {
   assertSDK(sdk)
   if (sdk[ATTACHED] && !sdk[ATTACHED].destroyed) return sdk[ATTACHED]
 
-  const isReattach = !!sdk[ATTACHED]
-  const previousTopics = isReattach ? sdk[ATTACHED].topics() : []
+  const state = sdk[ATTACHMENT_STATE] || { discoveries: new Set() }
+  const isReattach = !!sdk[ATTACHMENT_STATE]
 
   const { lan: suppliedLAN, lanOnly = false, ...lanOpts } = opts
   const lan = suppliedLAN || new HyperDHTmDNS({
@@ -42,7 +43,15 @@ async function attachHyperSDK (sdk, opts = {}) {
         throw error
       }
 
-      return new CombinedDiscovery(globalSession, localSession)
+      const discovery = new CombinedDiscovery(
+        globalSession,
+        localSession,
+        localTopic,
+        joinOpts,
+        () => state.discoveries.delete(discovery)
+      )
+      state.discoveries.add(discovery)
+      return discovery
     }
 
     sdk.leave = async (topic) => {
@@ -51,6 +60,9 @@ async function attachHyperSDK (sdk, opts = {}) {
         original.leave(topic),
         sdk[ATTACHED].leave(localTopic)
       ])
+      for (const discovery of state.discoveries) {
+        if (discovery.topic.equals(localTopic)) state.discoveries.delete(discovery)
+      }
       throwFirstRejection(results)
     }
 
@@ -96,20 +108,36 @@ async function attachHyperSDK (sdk, opts = {}) {
     sdk.swarm.emit('connection', socket, peerInfo)
   })
 
-  for (const topic of previousTopics) {
-    lan.join(topic).catch(() => {})
+  const restoredSessions = []
+  for (const discovery of state.discoveries) {
+    restoredSessions.push([discovery, lan.join(discovery.topic, discovery.joinOpts)])
   }
 
   await lan.ready()
+  for (const [discovery, localSession] of restoredSessions) {
+    if (!state.discoveries.has(discovery) || discovery.destroyed) {
+      await localSession.destroy()
+    } else {
+      discovery.replaceLocal(localSession)
+    }
+  }
+  sdk[ATTACHMENT_STATE] = state
   if (lanOnly && !isReattach) await sdk.setLANOnly(true)
   return lan
 }
 
 class CombinedDiscovery {
-  constructor (globalSession, localSession) {
+  constructor (globalSession, localSession, topic, joinOpts, onDestroy) {
     this.global = globalSession
     this.local = localSession
-    this.topic = localSession.topic || globalSession.topic
+    this.topic = Buffer.from(topic)
+    this.joinOpts = joinOpts
+    this.destroyed = false
+    this._onDestroy = onDestroy
+  }
+
+  replaceLocal (localSession) {
+    this.local = localSession
   }
 
   async refresh (opts) {
@@ -126,6 +154,9 @@ class CombinedDiscovery {
   }
 
   async destroy () {
+    if (this.destroyed) return
+    this.destroyed = true
+    this._onDestroy()
     const results = await Promise.allSettled([
       this.global.destroy(),
       this.local.destroy()
