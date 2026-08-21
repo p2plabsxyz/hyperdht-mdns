@@ -27,6 +27,8 @@
     "offline",
     "p2p"
   ],
+  "repository": "https://github.com/p2plabsxyz/hyperdht-mdns",
+  "author": "P2P Labs <contact@p2plabs.xyz>",
   "license": "MIT",
   "engines": {
     "node": ">=20"
