@@ -14,14 +14,14 @@ grows.
 ## Install
 
 ```sh
-npm install hyperdht-mdns
+npm install @p2plabs/hyperdht-mdns
 ```
 
 ## Usage
 
 ```js
 const Corestore = require('corestore')
-const HyperDHTmDNS = require('hyperdht-mdns')
+const HyperDHTmDNS = require('@p2plabs/hyperdht-mdns')
 
 const store = new Corestore('./userData/hyper')
 const lan = new HyperDHTmDNS({ port: 49799 })
@@ -45,7 +45,7 @@ event, and includes LAN shutdown in the SDK lifecycle:
 
 ```js
 import { create as createSDK } from 'hyper-sdk'
-import HyperDHTmDNS from 'hyperdht-mdns'
+import HyperDHTmDNS from '@p2plabs/hyperdht-mdns'
 
 const sdk = await createSDK({ storage: './userData/hyper' })
 await HyperDHTmDNS.attachHyperSDK(sdk, { port: 49799 })
@@ -66,7 +66,7 @@ and join both swarms:
 ```js
 const HyperDHT = require('hyperdht')
 const Hyperswarm = require('hyperswarm')
-const HyperDHTmDNS = require('hyperdht-mdns')
+const HyperDHTmDNS = require('@p2plabs/hyperdht-mdns')
 
 const keyPair = HyperDHT.keyPair()
 const globalSwarm = new Hyperswarm({ keyPair })
