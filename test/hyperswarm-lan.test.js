@@ -4,6 +4,7 @@ const { EventEmitter, once } = require('events')
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const HyperDHTmDNS = require('..')
+const { topicToken } = require('../src/record')
 
 class FakeDHT {
   constructor () {
@@ -274,6 +275,76 @@ test('resume reports an interface change instead of advertising an unbound addre
   await assert.rejects(lan.resume(), { code: 'ERR_LAN_INTERFACE_CHANGED' })
   assert.equal(lan.suspended, true)
   assert.equal(lan.host, '192.168.1.50')
+
+  await lan.destroy()
+})
+
+test('joining more topics than the record can carry does not fail the join', async () => {
+  const dht = new FakeDHT()
+  const keyPair = { publicKey: Buffer.alloc(32, 1) }
+  const swarm = new FakeSwarm(dht, keyPair)
+  const adapter = new FakeAdapter()
+  const lan = new HyperDHTmDNS({
+    host: '127.0.0.1',
+    port: 49799,
+    dht,
+    swarm,
+    adapter,
+    eager: false
+  })
+
+  await lan.ready()
+
+  const warnings = []
+  lan.on('warning', (error) => warnings.push(error))
+
+  // Far more than fit in one TXT record. A consumer browsing hyper:// drives
+  // reaches this within a single session, and every join used to throw a
+  // RangeError out through hyperswarm once the record filled up.
+  const topics = Array.from({ length: 40 }, (_, index) => Buffer.alloc(32, index))
+  for (const topic of topics) {
+    assert.doesNotThrow(() => lan.join(topic))
+  }
+
+  // Every topic is still tracked, so an incoming peer advertising one that did
+  // not fit is still matched locally.
+  assert.equal(lan._matchingTopics([topicToken(topics[0])]).length, 1)
+  assert.equal(lan._matchingTopics([topicToken(topics[39])]).length, 1)
+
+  await lan._advertisementQueue
+  assert.ok(adapter.record.dropped > 0)
+  assert.equal(adapter.record.advertised + adapter.record.dropped, topics.length)
+  assert.equal(warnings.length, 1, 'expected one advertisement-full warning, not one per update')
+  assert.match(warnings[0].message, /advertisement full/i)
+
+  await lan.destroy()
+})
+
+test('releasing a topic stops advertising it', async () => {
+  const dht = new FakeDHT()
+  const keyPair = { publicKey: Buffer.alloc(32, 1) }
+  const swarm = new FakeSwarm(dht, keyPair)
+  const adapter = new FakeAdapter()
+  const lan = new HyperDHTmDNS({
+    host: '127.0.0.1',
+    port: 49799,
+    dht,
+    swarm,
+    adapter,
+    eager: false
+  })
+
+  await lan.ready()
+
+  const topic = Buffer.alloc(32, 3)
+  const session = lan.join(topic)
+  await lan._advertisementQueue
+  assert.equal(adapter.record.advertised, 1)
+
+  await session.destroy()
+  await lan._advertisementQueue
+  assert.equal(adapter.record.advertised, 0)
+  assert.equal(lan._matchingTopics([topicToken(topic)]).length, 0)
 
   await lan.destroy()
 })

@@ -42,6 +42,7 @@ class HyperDHTmDNS extends EventEmitter {
     this._advertising = false
     this._advertisedSignature = null
     this._advertisementQueue = Promise.resolve()
+    this._lastDropped = 0
 
     if (opts.swarm) {
       this.swarm = opts.swarm
@@ -186,23 +187,21 @@ class HyperDHTmDNS extends EventEmitter {
     return this.swarm.status(topic)
   }
 
+  /**
+   * Track a joined topic.
+   *
+   * Every joined topic is kept, however many there are: incoming peers are
+   * matched against this set, so a topic that does not fit in the advertisement
+   * is still discoverable when the peer on the other side advertises it. The
+   * record decides for itself how many it can carry — running out of room in a
+   * multicast packet is not a reason to fail the caller's join.
+   */
   _retainTopic (topic) {
     const id = topic.toString('hex')
     const existing = this._joinedTopics.get(id)
 
     if (existing) existing.refs++
-    else {
-      if (this._joinedTopics.size >= MAX_ADVERTISED_TOPICS) {
-        throw new RangeError(`Cannot join more than ${MAX_ADVERTISED_TOPICS} LAN topics`)
-      }
-      this._joinedTopics.set(id, { topic: Buffer.from(topic), refs: 1 })
-      try {
-        this._createRecord()
-      } catch (error) {
-        this._joinedTopics.delete(id)
-        throw error
-      }
-    }
+    else this._joinedTopics.set(id, { topic: Buffer.from(topic), token: topicToken(topic), refs: 1 })
 
     this._topicsChanged()
   }
@@ -244,6 +243,17 @@ class HyperDHTmDNS extends EventEmitter {
     if (!this._advertising || this.suspended || this.destroyed) return
 
     const record = this._createRecord()
+
+    if (record.dropped !== this._lastDropped) {
+      this._lastDropped = record.dropped
+      if (record.dropped > 0) {
+        this.emit('warning', new Error(
+          `LAN advertisement full: ${record.dropped} of ${record.dropped + record.advertised} ` +
+          'joined topics are not advertised. They remain discoverable through peers that advertise them.'
+        ))
+      }
+    }
+
     const signature = recordSignature(record)
     if (signature === this._advertisedSignature) return
     const previous = this._advertisement
@@ -355,7 +365,7 @@ class HyperDHTmDNS extends EventEmitter {
   _matchingTopics (tokens) {
     const local = new Map()
     for (const entry of this._joinedTopics.values()) {
-      local.set(topicToken(entry.topic), entry.topic)
+      local.set(entry.token, entry.topic)
     }
 
     const matched = []
@@ -367,7 +377,7 @@ class HyperDHTmDNS extends EventEmitter {
 
   _localTokenSignature () {
     return [...this._joinedTopics.values()]
-      .map(entry => topicToken(entry.topic))
+      .map(entry => entry.token)
       .sort()
       .join(',')
   }
