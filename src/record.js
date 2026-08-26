@@ -10,19 +10,7 @@ const TOPICS_PER_TXT_ENTRY = 5
 const MAX_ADVERTISED_TOPICS = 32
 const MAX_TXT_BYTES = 900
 
-function createRecord ({ peerKey, port, topics = [] }) {
-  if (!Buffer.isBuffer(peerKey) || peerKey.byteLength !== 32) {
-    throw new TypeError('peerKey must be a 32-byte Buffer')
-  }
-
-  assertPort(port)
-  if (!Array.isArray(topics)) throw new TypeError('topics must be an array')
-  if (topics.length > MAX_ADVERTISED_TOPICS) {
-    throw new RangeError(`Cannot advertise more than ${MAX_ADVERTISED_TOPICS} topics`)
-  }
-
-  const peerKeyHex = peerKey.toString('hex')
-  const tokens = topics.map(topicToken).sort()
+function buildTXT ({ peerKeyHex, port, tokens }) {
   const txt = {
     v: String(PROTOCOL_VERSION),
     peerKey: peerKeyHex,
@@ -36,8 +24,50 @@ function createRecord ({ peerKey, port, topics = [] }) {
       .join(',')
   }
 
-  if (encodedTXTSize(txt) > MAX_TXT_BYTES) {
-    throw new RangeError(`LAN mDNS TXT record exceeds ${MAX_TXT_BYTES} bytes; reduce joined topics`)
+  return txt
+}
+
+/**
+ * Build the mDNS service record advertising the topics this node has joined.
+ *
+ * A TXT record has a hard size budget, and a 43-character token per topic
+ * exhausts MAX_TXT_BYTES well before MAX_ADVERTISED_TOPICS is reached. So the
+ * record advertises as many topics as fit rather than refusing to exist: a full
+ * advertisement is a normal condition for a busy node, not a caller error, and
+ * throwing here propagates all the way out of join() and fails whatever the
+ * application was doing.
+ *
+ * Dropping an advertisement is cheap. Peers are matched against every joined
+ * topic, not just the advertised ones, so a topic that does not fit is still
+ * discoverable as long as the peer on the other side advertises it.
+ *
+ * The newest topics win: a peer is most likely looking for what was just
+ * joined. `dropped`/`advertised` are reported so callers can surface it.
+ *
+ * @param {object} options
+ * @param {Buffer} options.peerKey - 32-byte public key.
+ * @param {number} options.port
+ * @param {Buffer[]} [options.topics] - Joined topics, oldest first.
+ * @returns {{ name: string, type: string, protocol: string, port: number, txt: object, advertised: number, dropped: number }}
+ */
+function createRecord ({ peerKey, port, topics = [] }) {
+  if (!Buffer.isBuffer(peerKey) || peerKey.byteLength !== 32) {
+    throw new TypeError('peerKey must be a 32-byte Buffer')
+  }
+
+  assertPort(port)
+  if (!Array.isArray(topics)) throw new TypeError('topics must be an array')
+
+  const peerKeyHex = peerKey.toString('hex')
+  const tokens = topics.map(topicToken)
+
+  // The budget depends on the port's digit count and the tN key width, so the
+  // cut-off is measured rather than assumed.
+  let from = Math.max(0, tokens.length - MAX_ADVERTISED_TOPICS)
+  let txt = buildTXT({ peerKeyHex, port, tokens: tokens.slice(from).sort() })
+  while (from < tokens.length && encodedTXTSize(txt) > MAX_TXT_BYTES) {
+    from++
+    txt = buildTXT({ peerKeyHex, port, tokens: tokens.slice(from).sort() })
   }
 
   return {
@@ -45,7 +75,9 @@ function createRecord ({ peerKey, port, topics = [] }) {
     type: SERVICE_TYPE,
     protocol: SERVICE_PROTOCOL,
     port,
-    txt
+    txt,
+    advertised: tokens.length - from,
+    dropped: from
   }
 }
 
