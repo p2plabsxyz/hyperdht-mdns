@@ -58,7 +58,14 @@ class FakeAdapter {
 
   advertise (record) {
     this.record = record
-    return { stop: () => { this.advertisementStopped = true } }
+    if (!this.records) this.records = new Map()
+    this.records.set(record.name, record)
+    return {
+      stop: () => {
+        this.advertisementStopped = true
+        if (this.records.get(record.name) === record) this.records.delete(record.name)
+      }
+    }
   }
 
   discover (service) { this.handlers.onService(service) }
@@ -279,7 +286,7 @@ test('resume reports an interface change instead of advertising an unbound addre
   await lan.destroy()
 })
 
-test('joining more topics than the record can carry does not fail the join', async () => {
+test('joining more topics than one record can carry advertises every topic in shards', async () => {
   const dht = new FakeDHT()
   const keyPair = { publicKey: Buffer.alloc(32, 1) }
   const swarm = new FakeSwarm(dht, keyPair)
@@ -295,12 +302,8 @@ test('joining more topics than the record can carry does not fail the join', asy
 
   await lan.ready()
 
-  const warnings = []
-  lan.on('warning', (error) => warnings.push(error))
-
-  // Far more than fit in one TXT record. A consumer browsing hyper:// drives
-  // reaches this within a single session, and every join used to throw a
-  // RangeError out through hyperswarm once the record filled up.
+  // Far more than fit in one TXT record. Every join remains locally
+  // discoverable rather than being rejected or silently dropped.
   const topics = Array.from({ length: 40 }, (_, index) => Buffer.alloc(32, index))
   for (const topic of topics) {
     assert.doesNotThrow(() => lan.join(topic))
@@ -312,10 +315,59 @@ test('joining more topics than the record can carry does not fail the join', asy
   assert.equal(lan._matchingTopics([topicToken(topics[39])]).length, 1)
 
   await lan._advertisementQueue
-  assert.ok(adapter.record.dropped > 0)
-  assert.equal(adapter.record.advertised + adapter.record.dropped, topics.length)
-  assert.equal(warnings.length, 1, 'expected one advertisement-full warning, not one per update')
-  assert.match(warnings[0].message, /advertisement full/i)
+  assert.ok(adapter.records.size > 1)
+  const advertised = new Set(
+    [...adapter.records.values()].flatMap(record => Object.entries(record.txt)
+      .filter(([key]) => /^t\d+$/.test(key))
+      .flatMap(([, value]) => value.split(',')))
+  )
+  assert.deepEqual(advertised, new Set(topics.map(topicToken)))
+
+  await lan.destroy()
+})
+
+test('aggregates remote topic shards and reports down only after the last shard', async () => {
+  const dht = new FakeDHT()
+  const keyPair = { publicKey: Buffer.alloc(32, 1) }
+  const swarm = new FakeSwarm(dht, keyPair)
+  const adapter = new FakeAdapter()
+  const lan = new HyperDHTmDNS({
+    host: '127.0.0.1',
+    port: 49799,
+    dht,
+    swarm,
+    adapter,
+    eager: false
+  })
+
+  await lan.ready()
+  const topics = Array.from({ length: 40 }, (_, index) => Buffer.alloc(32, index))
+  lan.join(topics[0])
+
+  const remoteRecords = require('../src/record').createRecords({
+    peerKey: Buffer.alloc(32, 2),
+    port: 49800,
+    topics
+  })
+  let downEvents = 0
+  lan.on('peer-down', () => { downEvents++ })
+
+  for (const record of remoteRecords) {
+    adapter.discover({ ...record, referer: { address: '192.168.1.9' } })
+  }
+  await new Promise((resolve) => setImmediate(resolve))
+
+  const peer = [...lan._knownPeers.values()][0]
+  assert.equal(peer.tokens.length, topics.length)
+  assert.equal([...lan._peerTopics.values()][0].length, 1)
+
+  for (const record of remoteRecords.slice(0, -1)) adapter.down(record)
+  assert.equal(lan._knownPeers.size, 1)
+  assert.equal(downEvents, 0)
+
+  adapter.down(remoteRecords.at(-1))
+  assert.equal(lan._knownPeers.size, 0)
+  assert.equal(downEvents, 1)
 
   await lan.destroy()
 })

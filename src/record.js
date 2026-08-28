@@ -81,6 +81,39 @@ function createRecord ({ peerKey, port, topics = [] }) {
   }
 }
 
+/**
+ * Build as many bounded mDNS service records as are needed to advertise every
+ * joined topic. Each service instance name carries a generation, shard index,
+ * and shard count so receivers can aggregate the records without spending TXT
+ * bytes on bookkeeping that would otherwise displace another topic token.
+ */
+function createRecords ({ peerKey, port, topics = [] }) {
+  if (!Buffer.isBuffer(peerKey) || peerKey.byteLength !== 32) {
+    throw new TypeError('peerKey must be a 32-byte Buffer')
+  }
+
+  assertPort(port)
+  if (!Array.isArray(topics)) throw new TypeError('topics must be an array')
+
+  const peerKeyHex = peerKey.toString('hex')
+  const tokens = topics.map(topicToken)
+  const shards = partitionTokens({ peerKeyHex, port, tokens })
+  const generation = tokenGeneration(tokens)
+
+  return shards.map((shard, index) => ({
+    name: shardName(peerKeyHex, generation, index, shards.length),
+    type: SERVICE_TYPE,
+    protocol: SERVICE_PROTOCOL,
+    port,
+    txt: buildTXT({ peerKeyHex, port, tokens: shard.slice().sort() }),
+    advertised: shard.length,
+    dropped: 0,
+    shard: index,
+    shards: shards.length,
+    generation
+  }))
+}
+
 function parseRecord (service) {
   if (!service || !service.txt) return null
 
@@ -106,11 +139,74 @@ function parseRecord (service) {
   }
   if (new Set(tokens).size !== tokens.length) return null
 
-  return {
+  const shard = parseShardName(service.name, peerKeyHex)
+
+  const parsed = {
     peerKey: Buffer.from(peerKeyHex, 'hex'),
     port,
     tokens
   }
+  if (shard.generation !== null) {
+    parsed.shard = shard.index
+    parsed.shards = shard.count
+    parsed.generation = shard.generation
+  }
+  return parsed
+}
+
+function partitionTokens ({ peerKeyHex, port, tokens }) {
+  if (tokens.length === 0) return [[]]
+
+  const shards = []
+  let shard = []
+
+  for (const token of tokens) {
+    const candidate = [...shard, token]
+    const txt = buildTXT({ peerKeyHex, port, tokens: candidate.slice().sort() })
+
+    if (candidate.length > MAX_ADVERTISED_TOPICS || encodedTXTSize(txt) > MAX_TXT_BYTES) {
+      shards.push(shard)
+      shard = [token]
+    } else {
+      shard = candidate
+    }
+  }
+
+  shards.push(shard)
+  return shards
+}
+
+function tokenGeneration (tokens) {
+  const hash = createHash('sha256')
+  for (const token of tokens.slice().sort()) hash.update(token).update('\0')
+  return hash.digest('base64url').slice(0, 11)
+}
+
+function shardName (peerKeyHex, generation, index, count) {
+  return `hyperdht-mdns-${peerKeyHex.slice(0, 12)}-${generation}-${index}-${count}`
+}
+
+function parseShardName (name, peerKeyHex) {
+  const legacy = {
+    index: 0,
+    count: 1,
+    generation: null
+  }
+  if (typeof name !== 'string') return legacy
+
+  const prefix = `hyperdht-mdns-${peerKeyHex.slice(0, 12)}-`
+  if (!name.startsWith(prefix)) return legacy
+
+  const match = /^([A-Za-z0-9_-]{11})-(\d+)-(\d+)$/.exec(name.slice(prefix.length))
+  if (!match) return legacy
+
+  const index = Number(match[2])
+  const count = Number(match[3])
+  if (!Number.isInteger(index) || !Number.isInteger(count) || count < 1 || count > 65535 || index < 0 || index >= count) {
+    return legacy
+  }
+
+  return { generation: match[1], index, count }
 }
 
 function topicToken (topic) {
@@ -150,6 +246,7 @@ module.exports = {
   SERVICE_PROTOCOL,
   SERVICE_TYPE,
   createRecord,
+  createRecords,
   parseRecord,
   topicToken
 }

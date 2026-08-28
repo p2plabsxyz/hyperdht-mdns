@@ -4,12 +4,12 @@ Offline LAN discovery for Hyperswarm using zero-install mDNS and an isolated
 HyperDHT.
 
 Experimental offline LAN discovery for Hyperswarm and Corestore applications.
-Each process runs a separate, bootstrap-free HyperDHT and advertises one mDNS
-service (`_hyperdht-mdns._udp`). mDNS exchanges node endpoints and hashed topic
-tokens. Nodes make one authenticated, encrypted connection only when they share
-a joined topic; Corestore multiplexes shared cores over that stream. Isolated
-Hyperswarm topic joins also remain active for normal DHT discovery as the LAN
-grows.
+Each process runs a separate, bootstrap-free HyperDHT and advertises one or more
+mDNS services (`_hyperdht-mdns._udp`). mDNS exchanges node endpoints and hashed
+topic tokens. Nodes make one authenticated, encrypted connection only when they
+share a joined topic; Corestore multiplexes shared cores over that stream.
+Isolated Hyperswarm topic joins also remain active for normal DHT discovery as
+the LAN grows.
 
 ## Install
 
@@ -130,7 +130,7 @@ destroyed.
 
 ## mDNS record
 
-One service is published per process:
+One service is normally published per process:
 
 ```json
 {
@@ -144,8 +144,11 @@ One service is published per process:
 
 Each token is `SHA256("hyperdht-mdns:" + topic)` encoded as unpadded base64url.
 Raw discovery keys are never advertised. TXT values are chunked below the DNS
-255-byte string limit, and the aggregate TXT payload is capped at 900 bytes to
-avoid fragmented multicast packets on typical Wi-Fi networks.
+255-byte string limit, and each TXT payload is capped at 900 bytes to avoid
+fragmented multicast packets on typical Wi-Fi networks. When every joined topic
+does not fit in one payload, the module publishes additional bounded service
+records. Their service names identify the generation and shard, allowing peers
+to aggregate the complete topic set without silently dropping older topics.
 
 Two-node DHTs have a storage symmetry problem: each node stores its announcement
 on the other node, then queries that other node and sees only its own record.

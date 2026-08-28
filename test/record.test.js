@@ -2,7 +2,7 @@
 
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { createRecord, parseRecord, topicToken, MAX_TXT_BYTES } = require('../src/record')
+const { createRecord, createRecords, parseRecord, topicToken, MAX_TXT_BYTES } = require('../src/record')
 
 test('creates and parses hashed topic tokens in a node-level mDNS record', () => {
   const peerKey = Buffer.alloc(32, 7)
@@ -79,6 +79,29 @@ test('advertises every topic when they all fit', () => {
 
   assert.equal(record.dropped, 0)
   assert.equal(record.advertised, 2)
+})
+
+test('shards a full topic set without dropping any advertisement', () => {
+  const peerKey = Buffer.alloc(32, 1)
+  const topics = Array.from({ length: 80 }, (_, index) => {
+    const topic = Buffer.alloc(32)
+    topic.writeUInt32BE(index)
+    return topic
+  })
+  const records = createRecords({ peerKey, port: 49799, topics })
+
+  assert.ok(records.length > 1)
+  assert.ok(records.every(record => txtSize(record.txt) <= MAX_TXT_BYTES))
+  assert.ok(records.every(record => record.dropped === 0))
+
+  const parsed = records.map(parseRecord)
+  assert.ok(parsed.every(Boolean))
+  assert.ok(parsed.every((record, index) => record.shard === index))
+  assert.ok(parsed.every(record => record.shards === records.length))
+  assert.equal(new Set(parsed.map(record => record.generation)).size, 1)
+
+  const advertised = new Set(parsed.flatMap(record => record.tokens))
+  assert.deepEqual(advertised, new Set(topics.map(topicToken)))
 })
 
 test('rejects unsupported or malformed records', () => {
