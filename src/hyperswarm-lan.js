@@ -9,7 +9,7 @@ const {
   MAX_ADVERTISED_TOPICS,
   SERVICE_PROTOCOL,
   SERVICE_TYPE,
-  createRecord,
+  createRecords,
   parseRecord,
   topicToken
 } = require('./record')
@@ -34,6 +34,7 @@ class HyperDHTmDNS extends EventEmitter {
     this._direct = opts.eager !== false
     this._joinedTopics = new Map()
     this._knownPeers = new Map()
+    this._peerRecords = new Map()
     this._peerTopics = new Map()
     this._directConnections = new Map()
     this._connectionInfo = new Map()
@@ -42,7 +43,6 @@ class HyperDHTmDNS extends EventEmitter {
     this._advertising = false
     this._advertisedSignature = null
     this._advertisementQueue = Promise.resolve()
-    this._lastDropped = 0
 
     if (opts.swarm) {
       this.swarm = opts.swarm
@@ -71,6 +71,7 @@ class HyperDHTmDNS extends EventEmitter {
     assertAdapter(this.adapter)
     this._browser = null
     this._advertisement = null
+    this._advertisements = []
     this._onServiceDiscovered = (service) => {
       this._handleService(service).catch((error) => this.emit('warning', error))
     }
@@ -78,8 +79,7 @@ class HyperDHTmDNS extends EventEmitter {
     this._onUpdate = () => this.emit('update')
     this._onDiscoveryError = (error) => this.emit('error', error)
     this._onDiscoveryDown = (service) => {
-      this._handleServiceDown(service)
-      this.emit('peer-down', service)
+      if (this._handleServiceDown(service)) this.emit('peer-down', service)
     }
 
     this.swarm.on('connection', this._onConnection)
@@ -117,11 +117,11 @@ class HyperDHTmDNS extends EventEmitter {
     const address = this.dht.address()
     if (address && address.port) this.port = address.port
 
-    const record = this._createRecord()
-    await this._startDiscovery(record)
+    const records = this._createRecords()
+    await this._startDiscovery(records)
     if (this.destroyed) return
 
-    this._advertisedSignature = recordSignature(record)
+    this._advertisedSignature = recordSignature(records)
     this._advertising = true
     await this._updateAdvertisement()
     this.emit('ready')
@@ -223,8 +223,8 @@ class HyperDHTmDNS extends EventEmitter {
     }
   }
 
-  _createRecord () {
-    return createRecord({
+  _createRecords () {
+    return createRecords({
       peerKey: this.keyPair.publicKey,
       port: this.port,
       topics: [...this._joinedTopics.values()].map(entry => entry.topic)
@@ -242,30 +242,20 @@ class HyperDHTmDNS extends EventEmitter {
   async _updateAdvertisement () {
     if (!this._advertising || this.suspended || this.destroyed) return
 
-    const record = this._createRecord()
-
-    if (record.dropped !== this._lastDropped) {
-      this._lastDropped = record.dropped
-      if (record.dropped > 0) {
-        this.emit('warning', new Error(
-          `LAN advertisement full: ${record.dropped} of ${record.dropped + record.advertised} ` +
-          'joined topics are not advertised. They remain discoverable through peers that advertise them.'
-        ))
-      }
+    const records = this._createRecords()
+    const signature = recordSignature(records)
+    if (signature === this._advertisedSignature) return
+    const previous = this._advertisements
+    const advertisements = await this._advertiseRecords(records)
+    if (!this._advertising || this.suspended || this.destroyed) {
+      await stopHandles(advertisements)
+      return
     }
 
-    const signature = recordSignature(record)
-    if (signature === this._advertisedSignature) return
-    const previous = this._advertisement
-    this._advertisement = null
-    await stopHandle(previous)
-    if (!this._advertising || this.suspended || this.destroyed) return
-
-    this._advertisement = await this.adapter.advertise(record, {
-      onError: this._onDiscoveryError
-    })
-    assertHandle(this._advertisement, 'advertise')
+    this._advertisements = advertisements
+    this._advertisement = advertisements[0] || null
     this._advertisedSignature = signature
+    await stopHandles(previous)
   }
 
   async _handleService (service) {
@@ -277,12 +267,22 @@ class HyperDHTmDNS extends EventEmitter {
     if (record.peerKey.equals(this.keyPair.publicKey)) return
 
     const id = record.peerKey.toString('hex')
+    let advertised = this._peerRecords.get(id)
+    if (!advertised || advertised.generation !== record.generation) {
+      advertised = {
+        generation: record.generation,
+        shards: new Map()
+      }
+      this._peerRecords.set(id, advertised)
+    }
+    advertised.shards.set(record.shard, record)
+
     const previous = this._knownPeers.get(id)
     const peer = {
       host,
       port: record.port,
       publicKey: record.peerKey,
-      tokens: record.tokens,
+      tokens: aggregateTokens(advertised.shards),
       reachable: previous?.reachable === true &&
         previous.host === host && previous.port === record.port,
       lastSignature: previous?.lastSignature || null,
@@ -351,15 +351,33 @@ class HyperDHTmDNS extends EventEmitter {
 
   _handleServiceDown (service) {
     const record = parseRecord(service)
-    if (!record || record.peerKey.equals(this.keyPair.publicKey)) return
+    if (!record || record.peerKey.equals(this.keyPair.publicKey)) return false
 
     const id = record.peerKey.toString('hex')
+    const advertised = this._peerRecords.get(id)
+    if (!advertised || advertised.generation !== record.generation) return false
+
+    const current = advertised.shards.get(record.shard)
+    if (!current || tokenSignature(current.tokens) !== tokenSignature(record.tokens)) return false
+    advertised.shards.delete(record.shard)
+
+    if (advertised.shards.size > 0) {
+      const peer = this._knownPeers.get(id)
+      if (peer) {
+        peer.tokens = aggregateTokens(advertised.shards)
+        this._considerPeer(peer).catch((error) => this.emit('warning', error))
+      }
+      return false
+    }
+
+    this._peerRecords.delete(id)
     const peer = this._knownPeers.get(id)
-    if (!peer) return
+    if (!peer) return false
     this._knownPeers.delete(id)
     this._peerTopics.delete(id)
     this._cancelReconnect(id)
     this._disconnectDirect(id)
+    return true
   }
 
   _matchingTopics (tokens) {
@@ -564,15 +582,15 @@ class HyperDHTmDNS extends EventEmitter {
 
     await this.swarm.resume(opts)
     this.suspended = false
-    const record = this._createRecord()
+    const records = this._createRecords()
     try {
-      await this._startDiscovery(record)
+      await this._startDiscovery(records)
     } catch (error) {
       this.suspended = true
       await this.swarm.suspend(opts).catch(() => {})
       throw error
     }
-    this._advertisedSignature = recordSignature(record)
+    this._advertisedSignature = recordSignature(records)
     this._advertising = true
 
     for (const peer of this._knownPeers.values()) {
@@ -604,7 +622,7 @@ class HyperDHTmDNS extends EventEmitter {
     this.emit('close')
   }
 
-  async _startDiscovery (record) {
+  async _startDiscovery (records) {
     const browser = await this.adapter.browse({
       type: SERVICE_TYPE,
       protocol: SERVICE_PROTOCOL
@@ -615,27 +633,43 @@ class HyperDHTmDNS extends EventEmitter {
     })
     assertHandle(browser, 'browse')
 
-    let advertisement
+    let advertisements
     try {
-      advertisement = await this.adapter.advertise(record, {
-        onError: this._onDiscoveryError
-      })
-      assertHandle(advertisement, 'advertise')
+      advertisements = await this._advertiseRecords(records)
     } catch (error) {
       await stopHandle(browser)
       throw error
     }
 
     this._browser = browser
-    this._advertisement = advertisement
+    this._advertisements = advertisements
+    this._advertisement = advertisements[0] || null
+  }
+
+  async _advertiseRecords (records) {
+    const advertisements = []
+    try {
+      for (const record of records) {
+        const advertisement = await this.adapter.advertise(record, {
+          onError: this._onDiscoveryError
+        })
+        assertHandle(advertisement, 'advertise')
+        advertisements.push(advertisement)
+      }
+      return advertisements
+    } catch (error) {
+      await stopHandles(advertisements)
+      throw error
+    }
   }
 
   async _stopDiscovery () {
     const browser = this._browser
-    const advertisement = this._advertisement
+    const advertisements = this._advertisements
     this._browser = null
     this._advertisement = null
-    await Promise.all([stopHandle(browser), stopHandle(advertisement)])
+    this._advertisements = []
+    await Promise.all([stopHandle(browser), stopHandles(advertisements)])
   }
 }
 
@@ -666,8 +700,8 @@ function stopHandle (handle) {
   return handle ? handle.stop() : Promise.resolve()
 }
 
-function recordSignature (record) {
-  return JSON.stringify(record.txt)
+function recordSignature (records) {
+  return JSON.stringify(records.map(record => [record.name, record.txt]))
 }
 
 function visiblePeer (peer, topics) {
@@ -679,4 +713,20 @@ function visiblePeer (peer, topics) {
 
 function refreshAll (discoveries) {
   return Promise.allSettled(discoveries.map((discovery) => discovery.refresh()))
+}
+
+function stopHandles (handles) {
+  return Promise.all((handles || []).map(stopHandle))
+}
+
+function aggregateTokens (shards) {
+  const tokens = new Set()
+  for (const record of shards.values()) {
+    for (const token of record.tokens) tokens.add(token)
+  }
+  return [...tokens].sort()
+}
+
+function tokenSignature (tokens) {
+  return tokens.slice().sort().join(',')
 }

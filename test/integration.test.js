@@ -48,6 +48,46 @@ test('two bootstrap-free swarms discover a shared topic through injected LAN nod
   assert.equal(b.dht.bootstrapNodes.length, 0)
 })
 
+test('a lower-key newcomer finds an old topic on a crowded peer', { timeout: 30_000 }, async (t) => {
+  const bus = new Set()
+  const first = new HyperDHTmDNS({
+    host: '127.0.0.1',
+    port: 49835,
+    allowLoopback: true,
+    adapter: new MemoryAdapter(bus)
+  })
+  const second = new HyperDHTmDNS({
+    host: '127.0.0.1',
+    port: 49836,
+    allowLoopback: true,
+    adapter: new MemoryAdapter(bus)
+  })
+
+  t.after(async () => Promise.allSettled([first.destroy(), second.destroy()]))
+
+  const crowded = Buffer.compare(first.keyPair.publicKey, second.keyPair.publicKey) > 0 ? first : second
+  const newcomer = crowded === first ? second : first
+  const shared = randomBytes(32)
+  crowded.join(shared)
+  for (let index = 0; index < 40; index++) crowded.join(randomBytes(32))
+  newcomer.join(shared)
+
+  const crowdedConnection = once(crowded, 'connection')
+  const newcomerConnection = once(newcomer, 'connection')
+  await Promise.all([crowded.ready(), newcomer.ready()])
+  const [[crowdedSocket, crowdedInfo], [newcomerSocket, newcomerInfo]] = await Promise.all([
+    crowdedConnection,
+    newcomerConnection
+  ])
+  crowdedSocket.on('error', () => {})
+  newcomerSocket.on('error', () => {})
+
+  assert.deepEqual(crowdedInfo.topics, [shared])
+  assert.deepEqual(newcomerInfo.topics, [shared])
+  assert.ok(crowded._advertisements.length > 1)
+  assert.equal(crowded._createRecords().every(record => record.dropped === 0), true)
+})
+
 test('reconnects a known shared-topic peer after repeated socket loss', { timeout: 30_000 }, async (t) => {
   const bus = new Set()
   const a = new HyperDHTmDNS({

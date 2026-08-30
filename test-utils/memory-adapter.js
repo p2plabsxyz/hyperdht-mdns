@@ -4,6 +4,7 @@ class MemoryAdapter {
   constructor (bus) {
     this.bus = bus
     this.record = null
+    this.records = new Map()
     this.handlers = null
   }
 
@@ -24,24 +25,26 @@ class MemoryAdapter {
   advertise (record) {
     this.record = record
 
-    for (const peer of this.bus) {
+    for (const advertisement of this.bus) {
       setImmediate(() => {
-        this.handlers?.onService(asService(peer.record))
-        peer.handlers?.onService(asService(record))
+        this.handlers?.onService(asService(advertisement.record))
+        advertisement.adapter.handlers?.onService(asService(record))
       })
     }
 
-    this.bus.add(this)
+    const advertisement = { adapter: this, record }
+    this.records.set(record.name, record)
+    this.bus.add(advertisement)
     let stopped = false
 
     return {
       stop: () => {
         if (stopped) return
         stopped = true
-        if (this.record !== record) return
-
-        this.bus.delete(this)
-        for (const peer of this.bus) {
+        if (this.records.get(record.name) === record) this.records.delete(record.name)
+        this.bus.delete(advertisement)
+        const peers = new Set([...this.bus].map(entry => entry.adapter))
+        for (const peer of peers) {
           setImmediate(() => peer.handlers?.onServiceDown(asService(record)))
         }
       }
