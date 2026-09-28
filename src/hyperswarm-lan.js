@@ -3,7 +3,6 @@
 const { EventEmitter } = require('events')
 const HyperDHT = require('hyperdht')
 const Hyperswarm = require('hyperswarm')
-const BonjourAdapter = require('./bonjour-adapter')
 const { selectLocalIPv4, serviceIPv4 } = require('./network')
 const {
   MAX_ADVERTISED_TOPICS,
@@ -67,7 +66,11 @@ class HyperDHTmDNS extends EventEmitter {
       throw new TypeError('The swarm keyPair must expose a publicKey Buffer')
     }
 
-    this.adapter = opts.adapter || new BonjourAdapter(opts.mdnsOptions)
+    // Required here rather than at module load so that supplying `adapter`
+    // avoids pulling in bonjour-service, and with it Node's dgram/os. That is
+    // what lets the module run on runtimes without those builtins, such as
+    // Bare, where the whole point of the adapter seam is to replace mDNS.
+    this.adapter = opts.adapter || new (require('./bonjour-adapter'))(opts.mdnsOptions)
     assertAdapter(this.adapter)
     this._browser = null
     this._advertisement = null
