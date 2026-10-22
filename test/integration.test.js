@@ -1,280 +1,160 @@
 'use strict'
 
-const { once } = require('events')
 const { randomBytes } = require('crypto')
 const { rm } = require('fs/promises')
 const { tmpdir } = require('os')
 const path = require('path')
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const HyperDHTmDNS = require('..')
-const { attachHyperSDK } = HyperDHTmDNS
+const createTestnet = require('hyperdht/testnet')
+const { attachHyperSDK, identityGate } = require('..')
 const MemoryAdapter = require('../test-utils/memory-adapter')
+const { until } = require('../test-utils/lan-net')
 
-test('two bootstrap-free swarms discover a shared topic through injected LAN nodes', { timeout: 30_000 }, async (t) => {
-  const bus = new Set()
-  const a = new HyperDHTmDNS({
-    host: '127.0.0.1',
-    port: 49831,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
-  const b = new HyperDHTmDNS({
-    host: '127.0.0.1',
-    port: 49832,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
+// Ports 21600-21699.
 
-  t.after(async () => Promise.allSettled([a.destroy(), b.destroy()]))
-
-  const topic = randomBytes(32)
-  a.join(topic)
-  b.join(topic)
-
-  const aConnection = once(a, 'connection')
-  const bConnection = once(b, 'connection')
-
-  await Promise.all([a.ready(), b.ready()])
-  const [[aSocket, aInfo], [bSocket, bInfo]] = await Promise.all([aConnection, bConnection])
-  aSocket.on('error', () => {})
-  bSocket.on('error', () => {})
-
-  assert.equal(aSocket.remotePublicKey.equals(b.keyPair.publicKey), true)
-  assert.equal(bSocket.remotePublicKey.equals(a.keyPair.publicKey), true)
-  assert.deepEqual(aInfo.topics, [topic])
-  assert.deepEqual(bInfo.topics, [topic])
-  assert.equal(a.dht.bootstrapNodes.length, 0)
-  assert.equal(b.dht.bootstrapNodes.length, 0)
-})
-
-test('a lower-key newcomer finds an old topic on a crowded peer', { timeout: 30_000 }, async (t) => {
-  const bus = new Set()
-  const first = new HyperDHTmDNS({
-    host: '127.0.0.1',
-    port: 49835,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
-  const second = new HyperDHTmDNS({
-    host: '127.0.0.1',
-    port: 49836,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
-
-  t.after(async () => Promise.allSettled([first.destroy(), second.destroy()]))
-
-  const crowded = Buffer.compare(first.keyPair.publicKey, second.keyPair.publicKey) > 0 ? first : second
-  const newcomer = crowded === first ? second : first
-  const shared = randomBytes(32)
-  crowded.join(shared)
-  for (let index = 0; index < 40; index++) crowded.join(randomBytes(32))
-  newcomer.join(shared)
-
-  const crowdedConnection = once(crowded, 'connection')
-  const newcomerConnection = once(newcomer, 'connection')
-  await Promise.all([crowded.ready(), newcomer.ready()])
-  const [[crowdedSocket, crowdedInfo], [newcomerSocket, newcomerInfo]] = await Promise.all([
-    crowdedConnection,
-    newcomerConnection
-  ])
-  crowdedSocket.on('error', () => {})
-  newcomerSocket.on('error', () => {})
-
-  assert.deepEqual(crowdedInfo.topics, [shared])
-  assert.deepEqual(newcomerInfo.topics, [shared])
-  assert.ok(crowded._advertisements.length > 1)
-  assert.equal(crowded._createRecords().every(record => record.dropped === 0), true)
-})
-
-test('reconnects a known shared-topic peer after repeated socket loss', { timeout: 30_000 }, async (t) => {
-  const bus = new Set()
-  const a = new HyperDHTmDNS({
-    host: '127.0.0.1',
-    port: 49841,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
-  const b = new HyperDHTmDNS({
-    host: '127.0.0.1',
-    port: 49842,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
-
-  t.after(async () => Promise.allSettled([a.destroy(), b.destroy()]))
-
-  const topic = randomBytes(32)
-  const firstA = once(a, 'connection')
-  const firstB = once(b, 'connection')
-  a.join(topic)
-  b.join(topic)
-  await Promise.all([a.ready(), b.ready()])
-
-  let [[aSocket, aInfo], [bSocket, bInfo]] = await Promise.all([firstA, firstB])
-  aSocket.on('error', () => {})
-  bSocket.on('error', () => {})
-  assert.deepEqual(aInfo.topics, [topic])
-  assert.deepEqual(bInfo.topics, [topic])
-
-  for (let cycle = 0; cycle < 2; cycle++) {
-    const nextA = once(a, 'connection')
-    const nextB = once(b, 'connection')
-    aSocket.destroy()
-
-    const [nextPairA, nextPairB] = await Promise.all([nextA, nextB])
-    aSocket = nextPairA[0]
-    aInfo = nextPairA[1]
-    bSocket = nextPairB[0]
-    bInfo = nextPairB[1]
-    aSocket.on('error', () => {})
-    bSocket.on('error', () => {})
-    assert.deepEqual(aInfo.topics, [topic])
-    assert.deepEqual(bInfo.topics, [topic])
-  }
-})
-
-test('rediscovers a shared-topic peer after repeated suspend and resume cycles', { timeout: 30_000 }, async (t) => {
-  const bus = new Set()
-  const a = new HyperDHTmDNS({
-    host: '127.0.0.1',
-    port: 49843,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
-  const b = new HyperDHTmDNS({
-    host: '127.0.0.1',
-    port: 49844,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
-
-  t.after(async () => Promise.allSettled([a.destroy(), b.destroy()]))
-
-  const topic = randomBytes(32)
-  const firstA = once(a, 'connection')
-  const firstB = once(b, 'connection')
-  a.join(topic)
-  b.join(topic)
-  await Promise.all([a.ready(), b.ready(), firstA, firstB])
-
-  for (let cycle = 0; cycle < 2; cycle++) {
-    const peerDown = once(b, 'peer-down')
-    await a.suspend()
-    await peerDown
-
-    const nextA = once(a, 'connection')
-    const nextB = once(b, 'connection')
-    await a.resume()
-    const [[aSocket, aInfo], [bSocket, bInfo]] = await Promise.all([nextA, nextB])
-    aSocket.on('error', () => {})
-    bSocket.on('error', () => {})
-    assert.deepEqual(aInfo.topics, [topic])
-    assert.deepEqual(bInfo.topics, [topic])
-  }
-})
-test('nodes on different topics discover DHT endpoints but do not connect', { timeout: 10_000 }, async (t) => {
-  const bus = new Set()
-  const a = new HyperDHTmDNS({
-    host: '127.0.0.1',
-    port: 49833,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
-  const b = new HyperDHTmDNS({
-    host: '127.0.0.1',
-    port: 49834,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
-  t.after(async () => Promise.allSettled([a.destroy(), b.destroy()]))
-
-  a.join(randomBytes(32))
-  b.join(randomBytes(32))
-  let connected = false
-  a.on('connection', () => { connected = true })
-  b.on('connection', () => { connected = true })
-
-  const reachableA = once(a, 'peer-reachable')
-  const reachableB = once(b, 'peer-reachable')
-  await Promise.all([a.ready(), b.ready(), reachableA, reachableB])
-  await new Promise((resolve) => setTimeout(resolve, 500))
-
-  assert.equal(connected, false)
-})
-test('joining a shared topic after discovery triggers a matched connection', { timeout: 15_000 }, async (t) => {
-  const bus = new Set()
-  const a = new HyperDHTmDNS({
-    host: '127.0.0.1',
-    port: 49835,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
-  const b = new HyperDHTmDNS({
-    host: '127.0.0.1',
-    port: 49836,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
-  t.after(async () => Promise.allSettled([a.destroy(), b.destroy()]))
-
-  await Promise.all([a.ready(), b.ready()])
-  const topic = randomBytes(32)
-  b.join(topic)
-  a.join(topic)
-
-  const [[socket, info]] = await Promise.all([
-    Promise.race([once(a, 'connection'), once(b, 'connection')])
-  ])
-  socket.on('error', () => {})
-  assert.deepEqual(info.topics, [topic])
-})
-
-test('hyper-sdk 6.2.2 receives matched LAN connections while public DHT is isolated', { timeout: 30_000 }, async (t) => {
+async function device (t, { bus, lanPort, internet = null, limits = {} }) {
   const { create } = await import('hyper-sdk')
-  const suffix = randomBytes(6).toString('hex')
-  const storageA = path.join(tmpdir(), `hyperswarm-lan-sdk-a-${suffix}`)
-  const storageB = path.join(tmpdir(), `hyperswarm-lan-sdk-b-${suffix}`)
-  const bus = new Set()
-  const sdks = []
-
+  const storage = path.join(tmpdir(), `hyperdht-mdns-it-${randomBytes(6).toString('hex')}`)
+  const sdk = await create({
+    storage,
+    // The internet: a testnet when there is one, otherwise no DHT at all.
+    swarmOpts: internet ? { bootstrap: internet.bootstrap } : { bootstrap: [] }
+  })
+  const lanOptions = {
+    host: '127.0.0.1',
+    port: lanPort,
+    allowLoopback: true,
+    adapter: new MemoryAdapter(bus),
+    limits: { sweepInterval: 50, ...limits }
+  }
+  await attachHyperSDK(sdk, lanOptions)
   t.after(async () => {
-    await Promise.allSettled(sdks.map(sdk => sdk.close()))
-    await Promise.allSettled([
-      rm(storageA, { recursive: true, force: true }),
-      rm(storageB, { recursive: true, force: true })
-    ])
+    await sdk.close().catch(() => {})
+    await rm(storage, { recursive: true, force: true })
   })
+  return { sdk, lanOptions }
+}
 
-  const sdkA = await create({ storage: storageA, swarmOpts: { bootstrap: [], port: 49837 } })
-  sdks.push(sdkA)
-  const sdkB = await create({ storage: storageB, swarmOpts: { bootstrap: [], port: 49838 } })
-  sdks.push(sdkB)
-  await attachHyperSDK(sdkA, {
-    host: '127.0.0.1',
-    port: 49839,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
-  await attachHyperSDK(sdkB, {
-    host: '127.0.0.1',
-    port: 49840,
-    allowLoopback: true,
-    adapter: new MemoryAdapter(bus)
-  })
+// Whether a copy has caught up to length, after asking the network.
+async function caughtUp (copy, length, opts) {
+  await copy.update(opts).catch(() => {})
+  return copy.length === length
+}
 
+// A device leaves the Wi-Fi: its LAN instance goes without a goodbye.
+async function leaveWifi (sdk) {
+  sdk.localSwarm.adapter.vanish()
+  await sdk.localSwarm.destroy()
+}
+
+// And comes back: a new LAN instance, as the apps make after a network change.
+async function rejoinWifi (sdk, lanOptions, bus) {
+  return attachHyperSDK(sdk, { ...lanOptions, adapter: new MemoryAdapter(bus) })
+}
+
+test('two devices replicate a core over the LAN, on keys made up for the network', { timeout: 60_000 }, async (t) => {
+  const bus = new Set()
+  const { sdk: writer } = await device(t, { bus, lanPort: 21600 })
+  const { sdk: reader } = await device(t, { bus, lanPort: 21601 })
+
+  const seen = []
+  reader.swarm.on('connection', (socket, info) => seen.push(info))
+
+  const core = writer.corestore.get({ name: 'messages' })
+  await core.ready()
+  await core.append(['one', 'two', 'three'].map((text) => Buffer.from(text)))
+  await writer.joinCore(core)
+
+  const copy = reader.corestore.get({ key: core.key })
+  await copy.ready()
+  await reader.joinCore(copy)
+  await until(() => caughtUp(copy, 3), { label: 'replication' })
+  assert.equal((await copy.get(2)).toString(), 'three')
+
+  const lan = seen.find((info) => info.lan)
+  assert.ok(lan, 'a LAN connection reached the SDK')
+  assert.equal(lan.ephemeral, true)
+  assert.equal(reader.localSwarm.keyPair.publicKey.equals(reader.swarm.keyPair.publicKey), false)
+  assert.equal(writer.localSwarm.keyPair.publicKey.equals(writer.swarm.keyPair.publicKey), false)
+})
+
+test('a device that drops off the Wi-Fi and comes back gets everything written meanwhile', { timeout: 90_000 }, async (t) => {
+  const bus = new Set()
+  const { sdk: writer } = await device(t, { bus, lanPort: 21610 })
+  const { sdk: reader, lanOptions } = await device(t, { bus, lanPort: 21611 })
+
+  const core = writer.corestore.get({ name: 'log' })
+  await core.ready()
+  await core.append(Buffer.from('before'))
+  await writer.joinCore(core)
+  const copy = reader.corestore.get({ key: core.key })
+  await copy.ready()
+  await reader.joinCore(copy)
+  await until(() => caughtUp(copy, 1), { label: 'first block' })
+  const firstKey = reader.localSwarm.keyPair.publicKey
+
+  for (let cycle = 0; cycle < 2; cycle++) {
+    // Airplane mode on.
+    await leaveWifi(reader)
+    for (let i = 0; i < 25; i++) await core.append(Buffer.from(`while away ${cycle}.${i}`))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    assert.ok(copy.length < core.length, 'nothing arrives while away')
+
+    // Airplane mode off.
+    const lan = await rejoinWifi(reader, lanOptions, bus)
+    assert.equal(lan.keyPair.publicKey.equals(firstKey), false, 'a new key on coming back')
+    await until(() => caughtUp(copy, core.length, { wait: true }), { timeout: 30_000, label: `catching up ${cycle}` })
+    assert.equal((await copy.get(core.length - 1)).toString(), `while away ${cycle}.24`)
+  }
+})
+
+test('a device that moves from the Wi-Fi to the internet keeps syncing, and the LAN lets it go', { timeout: 120_000 }, async (t) => {
+  const internet = await createTestnet(3, { host: '127.0.0.1', port: 21690 })
+  t.after(() => internet.destroy())
+  const bus = new Set()
+  const limits = { deviceTTL: 300, pingInterval: 200 }
+  const { sdk: writer } = await device(t, { bus, lanPort: 21620, internet, limits })
+  const { sdk: reader } = await device(t, { bus, lanPort: 21621, internet, limits })
+
+  const core = writer.corestore.get({ name: 'feed' })
+  await core.ready()
+  await core.append(Buffer.from('on the wifi'))
+  await writer.joinCore(core)
+  const copy = reader.corestore.get({ key: core.key })
+  await copy.ready()
+  await reader.joinCore(copy)
+  await until(() => caughtUp(copy, 1), { label: 'first block' })
+  await until(() => writer.localSwarm.info().devices === 1, { label: 'writer to see the reader on the LAN' })
+
+  // The reader leaves the Wi-Fi for the internet.
+  await leaveWifi(reader)
+  await core.append(Buffer.from('over the internet'))
+  await until(() => caughtUp(copy, 2, { wait: true }), { timeout: 60_000, label: 'internet sync' })
+  assert.equal((await copy.get(1)).toString(), 'over the internet')
+
+  // The writer's LAN view drops the device that is gone.
+  await until(() => writer.localSwarm.info().devices === 0, { timeout: 20_000, label: 'LAN to drop the reader' })
+})
+
+test('two members prove who they are inside a LAN connection; the network never sees it', { timeout: 60_000 }, async (t) => {
+  const bus = new Set()
+  const { sdk: a } = await device(t, { bus, lanPort: 21630 })
+  const { sdk: b } = await device(t, { bus, lanPort: 21631 })
+  const room = randomBytes(32)
+
+  const connected = new Promise((resolve) => a.swarm.on('connection', (socket, info) => { if (info.lan) resolve(socket) }))
+  const otherSide = new Promise((resolve) => b.swarm.on('connection', (socket, info) => { if (info.lan) resolve(socket) }))
   const topic = randomBytes(32)
-  const connectionA = once(sdkA.swarm, 'connection')
-  const connectionB = once(sdkB.swarm, 'connection')
-  sdkA.join(topic)
-  sdkB.join(topic)
+  a.join(topic)
+  b.join(topic)
+  const [socketA, socketB] = await Promise.all([connected, otherSide])
+  assert.equal(socketA.remotePublicKey.equals(b.swarm.keyPair.publicKey), false)
 
-  const [[socketA, infoA], [socketB, infoB]] = await Promise.all([connectionA, connectionB])
-  socketA.on('error', () => {})
-  socketB.on('error', () => {})
-  assert.deepEqual(infoA.topics, [topic])
-  assert.deepEqual(infoB.topics, [topic])
-  assert.equal(sdkA.localSwarm.keyPair, sdkA.swarm.keyPair)
-  assert.equal(sdkB.localSwarm.keyPair, sdkB.swarm.keyPair)
+  const [atA, atB] = await Promise.all([
+    identityGate(socketA, { keyPair: a.swarm.keyPair, secrets: [room], context: 'peerchat' }),
+    identityGate(socketB, { keyPair: b.swarm.keyPair, secrets: [room], context: 'peerchat' })
+  ])
+  assert.deepEqual(atA.publicKey, b.swarm.keyPair.publicKey)
+  assert.deepEqual(atB.publicKey, a.swarm.keyPair.publicKey)
 })

@@ -1,223 +1,69 @@
 'use strict'
 
-const { createHash } = require('crypto')
+const { randomBytes } = require('crypto')
 
 const SERVICE_TYPE = 'hyperdht-mdns'
 const SERVICE_PROTOCOL = 'udp'
-const PROTOCOL_VERSION = 1
-const TOPIC_PREFIX = Buffer.from('hyperdht-mdns:')
-const TOPICS_PER_TXT_ENTRY = 5
-const MAX_ADVERTISED_TOPICS = 32
-const MAX_TXT_BYTES = 900
-
-function buildTXT ({ peerKeyHex, port, tokens }) {
-  const txt = {
-    v: String(PROTOCOL_VERSION),
-    peerKey: peerKeyHex,
-    port: String(port),
-    tc: String(tokens.length)
-  }
-
-  for (let i = 0; i < tokens.length; i += TOPICS_PER_TXT_ENTRY) {
-    txt[`t${i / TOPICS_PER_TXT_ENTRY}`] = tokens
-      .slice(i, i + TOPICS_PER_TXT_ENTRY)
-      .join(',')
-  }
-
-  return txt
-}
+const PROTOCOL_VERSION = 2
+const NAME_PATTERN = /^[a-z0-9]{16}$/
 
 /**
- * Build the mDNS service record advertising the topics this node has joined.
+ * A device's mDNS record. It says only that a device of this kind is at this
+ * address and port, under a name made up for this run: no device key and no
+ * topics, so a passive listener on the network learns neither who the device
+ * is nor what it is in, and cannot link it to the same device on another day
+ * or another network. Topics are found through the LAN DHT, which needs the
+ * topic to ask for it.
  *
- * A TXT record has a hard size budget, and a 43-character token per topic
- * exhausts MAX_TXT_BYTES well before MAX_ADVERTISED_TOPICS is reached. So the
- * record advertises as many topics as fit rather than refusing to exist: a full
- * advertisement is a normal condition for a busy node, not a caller error, and
- * throwing here propagates all the way out of join() and fails whatever the
- * application was doing.
- *
- * Dropping an advertisement is cheap. Peers are matched against every joined
- * topic, not just the advertised ones, so a topic that does not fit is still
- * discoverable as long as the peer on the other side advertises it.
- *
- * The newest topics win: a peer is most likely looking for what was just
- * joined. `dropped`/`advertised` are reported so callers can surface it.
+ * Version 1 records carried the device's network key and a hash of every
+ * joined topic. They are ignored.
  *
  * @param {object} options
- * @param {Buffer} options.peerKey - 32-byte public key.
- * @param {number} options.port
- * @param {Buffer[]} [options.topics] - Joined topics, oldest first.
- * @returns {{ name: string, type: string, protocol: string, port: number, txt: object, advertised: number, dropped: number }}
+ * @param {number} options.port - The LAN DHT's UDP port.
+ * @param {string} [options.name] - Instance name; a fresh random one by default.
  */
-function createRecord ({ peerKey, port, topics = [] }) {
-  if (!Buffer.isBuffer(peerKey) || peerKey.byteLength !== 32) {
-    throw new TypeError('peerKey must be a 32-byte Buffer')
-  }
-
+function createRecord ({ port, name = randomName() } = {}) {
   assertPort(port)
-  if (!Array.isArray(topics)) throw new TypeError('topics must be an array')
-
-  const peerKeyHex = peerKey.toString('hex')
-  const tokens = topics.map(topicToken)
-
-  // The budget depends on the port's digit count and the tN key width, so the
-  // cut-off is measured rather than assumed.
-  let from = Math.max(0, tokens.length - MAX_ADVERTISED_TOPICS)
-  let txt = buildTXT({ peerKeyHex, port, tokens: tokens.slice(from).sort() })
-  while (from < tokens.length && encodedTXTSize(txt) > MAX_TXT_BYTES) {
-    from++
-    txt = buildTXT({ peerKeyHex, port, tokens: tokens.slice(from).sort() })
-  }
+  if (!NAME_PATTERN.test(name)) throw new TypeError('name must be 16 lowercase letters or digits')
 
   return {
-    name: `hyperdht-mdns-${peerKeyHex.slice(0, 12)}`,
+    name,
     type: SERVICE_TYPE,
     protocol: SERVICE_PROTOCOL,
     port,
-    txt,
-    advertised: tokens.length - from,
-    dropped: from
+    txt: { v: String(PROTOCOL_VERSION) }
   }
 }
 
-/**
- * Build as many bounded mDNS service records as are needed to advertise every
- * joined topic. Each service instance name carries a generation, shard index,
- * and shard count so receivers can aggregate the records without spending TXT
- * bytes on bookkeeping that would otherwise displace another topic token.
- */
-function createRecords ({ peerKey, port, topics = [] }) {
-  if (!Buffer.isBuffer(peerKey) || peerKey.byteLength !== 32) {
-    throw new TypeError('peerKey must be a 32-byte Buffer')
-  }
-
-  assertPort(port)
-  if (!Array.isArray(topics)) throw new TypeError('topics must be an array')
-
-  const peerKeyHex = peerKey.toString('hex')
-  const tokens = topics.map(topicToken)
-  const shards = partitionTokens({ peerKeyHex, port, tokens })
-  const generation = tokenGeneration(tokens)
-
-  return shards.map((shard, index) => ({
-    name: shardName(peerKeyHex, generation, index, shards.length),
-    type: SERVICE_TYPE,
-    protocol: SERVICE_PROTOCOL,
-    port,
-    txt: buildTXT({ peerKeyHex, port, tokens: shard.slice().sort() }),
-    advertised: shard.length,
-    dropped: 0,
-    shard: index,
-    shards: shards.length,
-    generation
-  }))
-}
-
+/** The name and port a service announces, or null for anything else. */
 function parseRecord (service) {
   if (!service || !service.txt) return null
 
   const version = toString(service.txt.v)
-  const peerKeyHex = toString(service.txt.peerKey)
-  const port = Number(service.port || toString(service.txt.port))
-  const topicCount = Number(toString(service.txt.tc) || 0)
-
   if (version !== String(PROTOCOL_VERSION)) return null
-  if (!/^[a-f0-9]{64}$/i.test(peerKeyHex)) return null
+
+  const name = typeof service.name === 'string' ? service.name.toLowerCase() : ''
+  if (!NAME_PATTERN.test(name)) return null
+
+  const port = Number(service.port)
   if (!isPort(port)) return null
-  if (!Number.isInteger(topicCount) || topicCount < 0 || topicCount > MAX_ADVERTISED_TOPICS) return null
 
-  const tokens = []
-  for (let i = 0; tokens.length < topicCount; i++) {
-    const chunk = toString(service.txt[`t${i}`])
-    if (!chunk) return null
-    tokens.push(...chunk.split(','))
-  }
-
-  if (tokens.length !== topicCount || tokens.some(token => !/^[A-Za-z0-9_-]{43}$/.test(token))) {
-    return null
-  }
-  if (new Set(tokens).size !== tokens.length) return null
-
-  const shard = parseShardName(service.name, peerKeyHex)
-
-  const parsed = {
-    peerKey: Buffer.from(peerKeyHex, 'hex'),
-    port,
-    tokens
-  }
-  if (shard.generation !== null) {
-    parsed.shard = shard.index
-    parsed.shards = shard.count
-    parsed.generation = shard.generation
-  }
-  return parsed
+  return { name, port }
 }
 
-function partitionTokens ({ peerKeyHex, port, tokens }) {
-  if (tokens.length === 0) return [[]]
-
-  const shards = []
-  let shard = []
-
-  for (const token of tokens) {
-    const candidate = [...shard, token]
-    const txt = buildTXT({ peerKeyHex, port, tokens: candidate.slice().sort() })
-
-    if (candidate.length > MAX_ADVERTISED_TOPICS || encodedTXTSize(txt) > MAX_TXT_BYTES) {
-      shards.push(shard)
-      shard = [token]
-    } else {
-      shard = candidate
-    }
+/** Sixteen random lowercase letters and digits. */
+function randomName () {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789'
+  const bytes = randomBytes(16)
+  let name = ''
+  // 36 does not divide 256, so bytes past the last whole multiple are skipped
+  // to keep every character equally likely.
+  for (let i = 0; name.length < 16; i++) {
+    if (i === bytes.length) return name + randomName().slice(name.length)
+    if (bytes[i] >= 252) continue
+    name += alphabet[bytes[i] % 36]
   }
-
-  shards.push(shard)
-  return shards
-}
-
-function tokenGeneration (tokens) {
-  const hash = createHash('sha256')
-  for (const token of tokens.slice().sort()) hash.update(token).update('\0')
-  return hash.digest('base64url').slice(0, 11)
-}
-
-function shardName (peerKeyHex, generation, index, count) {
-  return `hyperdht-mdns-${peerKeyHex.slice(0, 12)}-${generation}-${index}-${count}`
-}
-
-function parseShardName (name, peerKeyHex) {
-  const legacy = {
-    index: 0,
-    count: 1,
-    generation: null
-  }
-  if (typeof name !== 'string') return legacy
-
-  const prefix = `hyperdht-mdns-${peerKeyHex.slice(0, 12)}-`
-  if (!name.startsWith(prefix)) return legacy
-
-  const match = /^([A-Za-z0-9_-]{11})-(\d+)-(\d+)$/.exec(name.slice(prefix.length))
-  if (!match) return legacy
-
-  const index = Number(match[2])
-  const count = Number(match[3])
-  if (!Number.isInteger(index) || !Number.isInteger(count) || count < 1 || count > 65535 || index < 0 || index >= count) {
-    return legacy
-  }
-
-  return { generation: match[1], index, count }
-}
-
-function topicToken (topic) {
-  if (!Buffer.isBuffer(topic) || topic.byteLength !== 32) {
-    throw new TypeError('topic must be a 32-byte Buffer')
-  }
-
-  return createHash('sha256')
-    .update(TOPIC_PREFIX)
-    .update(topic)
-    .digest('base64url')
+  return name
 }
 
 function assertPort (port) {
@@ -233,20 +79,12 @@ function toString (value) {
   return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
 }
 
-function encodedTXTSize (txt) {
-  return Object.entries(txt).reduce((size, [key, value]) => {
-    return size + Buffer.byteLength(key) + Buffer.byteLength(String(value)) + 2
-  }, 0)
-}
-
 module.exports = {
+  NAME_PATTERN,
   PROTOCOL_VERSION,
-  MAX_ADVERTISED_TOPICS,
-  MAX_TXT_BYTES,
   SERVICE_PROTOCOL,
   SERVICE_TYPE,
   createRecord,
-  createRecords,
   parseRecord,
-  topicToken
+  randomName
 }

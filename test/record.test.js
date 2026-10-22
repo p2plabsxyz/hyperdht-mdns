@@ -2,114 +2,45 @@
 
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { createRecord, createRecords, parseRecord, topicToken, MAX_TXT_BYTES } = require('../src/record')
+const { createRecord, parseRecord, randomName, PROTOCOL_VERSION } = require('../src/record')
 
-test('creates and parses hashed topic tokens in a node-level mDNS record', () => {
-  const peerKey = Buffer.alloc(32, 7)
-  const topics = [Buffer.alloc(32, 8), Buffer.alloc(32, 9)]
-  const advertised = createRecord({ peerKey, port: 49799, topics })
-  const parsed = parseRecord(advertised)
+test('a record says only that a device is at a port, under a made-up name', () => {
+  const record = createRecord({ port: 49799 })
 
-  assert.equal(advertised.type, 'hyperdht-mdns')
-  assert.equal(advertised.protocol, 'udp')
-  assert.deepEqual(parsed, {
-    peerKey,
+  assert.equal(record.type, 'hyperdht-mdns')
+  assert.equal(record.protocol, 'udp')
+  assert.equal(record.port, 49799)
+  assert.match(record.name, /^[a-z0-9]{16}$/)
+  // No key and no topics: the version is the only thing in the TXT record.
+  assert.deepEqual(record.txt, { v: String(PROTOCOL_VERSION) })
+  assert.deepEqual(parseRecord(record), { name: record.name, port: 49799 })
+})
+
+test('names are random, so one run cannot be linked to the next', () => {
+  const names = new Set(Array.from({ length: 2000 }, () => randomName()))
+  assert.equal(names.size, 2000)
+  for (const name of names) assert.match(name, /^[a-z0-9]{16}$/)
+})
+
+test('version 1 records, which carried the device key and topic hashes, are ignored', () => {
+  const v1 = {
+    name: 'hyperdht-mdns-0707070707-abcdefghijk-0-1',
     port: 49799,
-    tokens: topics.map(topicToken).sort()
-  })
-  assert.equal(JSON.stringify(advertised.txt).includes(topics[0].toString('hex')), false)
-})
-
-function txtSize (txt) {
-  return Object.entries(txt).reduce(
-    (size, [key, value]) => size + Buffer.byteLength(key) + Buffer.byteLength(String(value)) + 2,
-    0
-  )
-}
-
-test('advertises as many topics as fit in the multicast packet budget', () => {
-  const peerKey = Buffer.alloc(32, 1)
-  const topics = Array.from({ length: 32 }, (_, index) => Buffer.alloc(32, index))
-  const record = createRecord({ peerKey, port: 49799, topics })
-
-  assert.ok(txtSize(record.txt) <= MAX_TXT_BYTES)
-  assert.ok(record.advertised > 0)
-  assert.equal(record.advertised + record.dropped, topics.length)
-  assert.equal(Number(record.txt.tc), record.advertised)
-
-  // A trimmed record is still a valid record: peers parse it unchanged.
-  const parsed = parseRecord(record)
-  assert.equal(parsed.tokens.length, record.advertised)
-})
-
-test('never refuses to build a record, however many topics are joined', () => {
-  const peerKey = Buffer.alloc(32, 1)
-
-  for (const count of [1, 15, 18, 19, 32, 200]) {
-    const topics = Array.from({ length: count }, (_, index) =>
-      Buffer.alloc(32, index % 256)
-    )
-    const record = createRecord({ peerKey, port: 49799, topics })
-
-    assert.ok(txtSize(record.txt) <= MAX_TXT_BYTES, `record too large at ${count} topics`)
-    assert.notEqual(parseRecord(record), null, `record unparseable at ${count} topics`)
-    assert.equal(record.advertised + record.dropped, count)
+    txt: { v: '1', peerKey: '07'.repeat(32), port: '49799', tc: '0' }
   }
+  assert.equal(parseRecord(v1), null)
 })
 
-test('keeps the most recently joined topics when the record is full', () => {
-  const peerKey = Buffer.alloc(32, 1)
-  const topics = Array.from({ length: 40 }, (_, index) => Buffer.alloc(32, index))
-  const record = createRecord({ peerKey, port: 49799, topics })
-
-  assert.ok(record.dropped > 0, 'expected this many topics to overflow the record')
-
-  const advertised = new Set(parseRecord(record).tokens)
-  const newest = topics.slice(-record.advertised).map(topicToken)
-  const oldest = topics.slice(0, record.dropped).map(topicToken)
-
-  assert.ok(newest.every((token) => advertised.has(token)), 'newest topics were dropped')
-  assert.ok(oldest.every((token) => !advertised.has(token)), 'oldest topics were kept')
-})
-
-test('advertises every topic when they all fit', () => {
-  const peerKey = Buffer.alloc(32, 1)
-  const topics = [Buffer.alloc(32, 1), Buffer.alloc(32, 2)]
-  const record = createRecord({ peerKey, port: 49799, topics })
-
-  assert.equal(record.dropped, 0)
-  assert.equal(record.advertised, 2)
-})
-
-test('shards a full topic set without dropping any advertisement', () => {
-  const peerKey = Buffer.alloc(32, 1)
-  const topics = Array.from({ length: 80 }, (_, index) => {
-    const topic = Buffer.alloc(32)
-    topic.writeUInt32BE(index)
-    return topic
-  })
-  const records = createRecords({ peerKey, port: 49799, topics })
-
-  assert.ok(records.length > 1)
-  assert.ok(records.every(record => txtSize(record.txt) <= MAX_TXT_BYTES))
-  assert.ok(records.every(record => record.dropped === 0))
-
-  const parsed = records.map(parseRecord)
-  assert.ok(parsed.every(Boolean))
-  assert.ok(parsed.every((record, index) => record.shard === index))
-  assert.ok(parsed.every(record => record.shards === records.length))
-  assert.equal(new Set(parsed.map(record => record.generation)).size, 1)
-
-  const advertised = new Set(parsed.flatMap(record => record.tokens))
-  assert.deepEqual(advertised, new Set(topics.map(topicToken)))
-})
-
-test('rejects unsupported or malformed records', () => {
-  assert.equal(parseRecord({ port: 1, txt: { v: '2', peerKey: 'a'.repeat(64) } }), null)
-  assert.equal(parseRecord({ port: 1, txt: { v: '1', peerKey: 'not-a-key' } }), null)
-  assert.equal(parseRecord({ port: 0, txt: { v: '1', peerKey: 'a'.repeat(64) } }), null)
-  assert.equal(parseRecord({
-    port: 1,
-    txt: { v: '1', peerKey: 'a'.repeat(64), tc: '1', t0: 'raw-topic' }
-  }), null)
+test('rejects records that are not well formed', () => {
+  const good = createRecord({ port: 49799 })
+  assert.equal(parseRecord(null), null)
+  assert.equal(parseRecord({ ...good, txt: undefined }), null)
+  assert.equal(parseRecord({ ...good, txt: { v: '3' } }), null)
+  assert.equal(parseRecord({ ...good, name: 'Akhileshs-MacBook' }), null)
+  assert.equal(parseRecord({ ...good, port: 0 }), null)
+  assert.equal(parseRecord({ ...good, port: 70000 }), null)
+  // The TXT value may arrive as a Buffer from the wire.
+  assert.deepEqual(parseRecord({ ...good, txt: { v: Buffer.from('2') } }), { name: good.name, port: 49799 })
+  assert.throws(() => createRecord({ port: 49799, name: 'not random' }))
+  assert.throws(() => createRecord({ port: 0 }))
 })

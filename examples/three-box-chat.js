@@ -25,11 +25,12 @@ async function main () {
 
   lan.on('error', error => console.error(`[mDNS error] ${error.message}`))
   lan.on('warning', error => console.warn(`[warning] ${error.message}`))
+  // mDNS gives only a name made up for the run, an address and a port.
   lan.on('peer', peer => {
-    console.log(`[discovered] ${shortKey(peer.publicKey)} at ${peer.host}:${peer.port}; shared topics=${peer.topics.length}`)
+    console.log(`[discovered] ${peer.name} at ${peer.host}:${peer.port}`)
   })
   lan.on('peer-reachable', peer => {
-    console.log(`[reachable] ${shortKey(peer.publicKey)} via LAN-only HyperDHT`)
+    console.log(`[reachable] ${peer.name} via LAN-only HyperDHT`)
   })
   lan.on('peer-down', service => {
     console.log(`[mDNS down] ${service?.name || 'unknown peer'}`)
@@ -42,7 +43,7 @@ async function main () {
   console.log('')
   console.log(`name: ${name}`)
   console.log(`room: ${room}`)
-  console.log(`public key: ${lan.keyPair.publicKey.toString('hex')}`)
+  console.log(`LAN key (new every run): ${lan.keyPair.publicKey.toString('hex')}`)
   console.log(`LAN DHT: ${lan.host}:${lan.port}/udp`)
   console.log(`bootstrap nodes: ${lan.dht.bootstrapNodes.length} (must be 0)`)
   console.log('Type a message and press Enter. Use Ctrl+C to stop.')
