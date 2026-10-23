@@ -6,7 +6,7 @@ const { execFileSync } = require('node:child_process')
 const path = require('node:path')
 
 // The adapter seam exists so a runtime without Node's dgram/os can supply its
-// own mDNS. That only holds if bonjour-service is never loaded unless it is
+// own mDNS. That only holds if multicast-dns is never loaded unless it is
 // actually used, so these tests pin the loading, not just the behaviour.
 //
 // They run in child processes because module loading is global: a require
@@ -16,12 +16,12 @@ const path = require('node:path')
 const ROOT = path.join(__dirname, '..')
 const REQUIRE_ROOT = `require(${JSON.stringify(ROOT)})`
 
-function bonjourLoadedBy (source) {
+function mdnsLoadedBy (source) {
   // The child exits explicitly: constructing an instance opens sockets that
   // would otherwise hold the loop open and hang the run.
   const script = `
     ${source}
-    const loaded = Object.keys(require.cache).some((p) => p.includes('bonjour-service'))
+    const loaded = Object.keys(require.cache).some((p) => p.includes('multicast-dns'))
     process.stdout.write(loaded ? 'loaded' : 'absent')
     process.exit(0)
   `
@@ -29,11 +29,11 @@ function bonjourLoadedBy (source) {
   return execFileSync(process.execPath, ['-e', script], { cwd: ROOT, timeout: 30000 }).toString()
 }
 
-test('requiring the package does not load bonjour-service', () => {
-  assert.equal(bonjourLoadedBy(REQUIRE_ROOT), 'absent')
+test('requiring the package does not load multicast-dns', () => {
+  assert.equal(mdnsLoadedBy(REQUIRE_ROOT), 'absent')
 })
 
-test('constructing with a custom adapter does not load bonjour-service', () => {
+test('constructing with a custom adapter does not load multicast-dns', () => {
   const source = `
     const HyperDHTmDNS = ${REQUIRE_ROOT}
     const adapter = {
@@ -44,22 +44,27 @@ test('constructing with a custom adapter does not load bonjour-service', () => {
     if (lan.adapter !== adapter) throw new Error('the supplied adapter was not used')
   `
 
-  assert.equal(bonjourLoadedBy(source), 'absent')
+  assert.equal(mdnsLoadedBy(source), 'absent')
 })
 
-test('the default adapter is still used when none is supplied', () => {
+test('the default adapter is used when none is supplied, and loads multicast-dns only once started', () => {
   const source = `
     const HyperDHTmDNS = ${REQUIRE_ROOT}
     const lan = new HyperDHTmDNS({ port: 49878 })
-    if (typeof lan.adapter.advertise !== 'function') throw new Error('no default adapter')
+    if (!(lan.adapter instanceof HyperDHTmDNS.MDNSAdapter)) throw new Error('no default adapter')
   `
 
-  assert.equal(bonjourLoadedBy(source), 'loaded')
+  assert.equal(mdnsLoadedBy(source), 'absent')
+  assert.equal(mdnsLoadedBy(`
+    const adapter = new (${REQUIRE_ROOT}.MDNSAdapter)()
+    adapter._acquire()
+    adapter._release()
+  `), 'loaded')
 })
 
-test('the BonjourAdapter export still resolves', () => {
-  const { BonjourAdapter } = require('..')
+test('the MDNSAdapter export resolves, and its old name with it', () => {
+  const { MDNSAdapter, BonjourAdapter } = require('..')
 
-  assert.equal(typeof BonjourAdapter, 'function')
-  assert.equal(bonjourLoadedBy(`${REQUIRE_ROOT}.BonjourAdapter`), 'loaded')
+  assert.equal(typeof MDNSAdapter, 'function')
+  assert.equal(BonjourAdapter, MDNSAdapter)
 })
