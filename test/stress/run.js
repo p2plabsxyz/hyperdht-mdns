@@ -13,8 +13,9 @@
 // 4. Airplane mode: devices go away, messages are sent, they come back on
 //    new keys and catch up on everything they missed.
 // 5. One hostile machine: many DHT nodes on one address, thousands of
-//    made-up mDNS devices, request and announce floods. Honest devices keep
-//    talking, latecomers still get in, and every table stays bounded.
+//    made-up mDNS devices, request floods (made-up tokens too) and announce
+//    floods. Honest devices keep talking, latecomers still get in, and every
+//    table stays bounded.
 
 const { fork } = require('child_process')
 const { randomBytes } = require('crypto')
@@ -252,6 +253,15 @@ async function main () {
   result = await spread(big, late, [...present][2], { timeout: 30_000 })
   report.push(`latecomers during the attack: ${Math.round(result.coverage * 100)}% got the next message`)
   check(result.coverage === 1, 'latecomers find the room during the attack')
+
+  // The made-up tokens all went to one device, which lets one machine ask a
+  // burst and then requestsPerSecond, whatever it asks.
+  const tokens = await request(hostileWorker, { cmd: 'count' }, (m) => m.type === 'count')
+  const limits = { ...DEFAULT_LIMITS, ...LIMITS }
+  const allowed = Math.ceil(limits.requestBurst + limits.requestsPerSecond * (tokens.seconds + 1))
+  report.push(`made-up tokens at one device: ${tokens.sent} requests in ${Math.round(tokens.seconds)} s, ${tokens.answered} answered, ${allowed} allowed at most`)
+  // In 2.0.0 dht-rpc answered every one of them, before any limit ran.
+  check(tokens.sent > allowed && tokens.answered <= allowed, 'requests with made-up tokens count against the rate limits')
 
   stats = await allStats()
   const totals = stats.devices.reduce((sum, device) => {

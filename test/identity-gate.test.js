@@ -6,7 +6,9 @@ const { randomBytes } = require('crypto')
 const HyperDHT = require('hyperdht')
 const Protomux = require('protomux')
 const c = require('compact-encoding')
+const sodium = require('sodium-universal')
 const securePair = require('../test-utils/secure-pair')
+const { until, sleep } = require('../test-utils/lan-net')
 const { identityGate } = require('..')
 const { PROTOCOL } = require('../src/identity-gate')
 
@@ -145,3 +147,120 @@ test('a device with no key pair to prove with learns nothing either', async (t) 
   ])
   assert.deepEqual(results, [null, null])
 })
+
+test('a token list over the cap of 512 closes the gate without being read, and 512 are still read', async (t) => {
+  for (const [count, read] of [[512, true], [513, false], [600, false]]) {
+    const pair = await securePair()
+    t.after(() => pair.close())
+    const room = randomBytes(32)
+
+    // The other side sends a list with the real token among random ones.
+    const seen = { identity: [], closed: false }
+    const channel = Protomux.from(pair.server).createChannel({
+      protocol: PROTOCOL,
+      id: Buffer.from('peerchat'),
+      onclose () { seen.closed = true }
+    })
+    const tokens = channel.addMessage({ encoding: c.array(c.fixed32) })
+    channel.addMessage({
+      encoding: c.raw,
+      onmessage (value) {
+        seen.identity.push(value)
+        channel.close()
+      }
+    })
+    channel.open()
+
+    const started = Date.now()
+    const gate = identityGate(pair.client, { keyPair: HyperDHT.keyPair(), secrets: [room], context: 'peerchat', timeout: 5000 })
+    const list = Array.from({ length: count }, () => randomBytes(32))
+    list[count >> 1] = token(room, pair.server, 'peerchat')
+    tokens.send(list)
+
+    assert.equal(await gate, null)
+    assert.ok(Date.now() - started < 2000, 'well before the timeout')
+    if (read) {
+      // Matched, so this side, which opened the connection, proved itself.
+      assert.equal(seen.identity.length, 1)
+      assert.equal(seen.identity[0][0], 1)
+    } else {
+      assert.deepEqual(seen.identity, [])
+      await until(() => seen.closed, { label: 'the gate to close its channel' })
+    }
+    // The connection itself is left alone.
+    assert.equal(pair.client.destroying, false)
+    assert.equal(pair.server.destroying, false)
+  }
+})
+
+test('someone who holds the secret and declines learns nothing from the side that proves second', async (t) => {
+  const pair = await securePair()
+  t.after(() => pair.close())
+  const room = randomBytes(32)
+
+  // The client opened the connection, so it would prove first. It holds the
+  // room key but sends no proof.
+  const seen = { tokens: null, identity: [] }
+  const channel = Protomux.from(pair.client).createChannel({ protocol: PROTOCOL, id: Buffer.from('peerchat') })
+  const tokens = channel.addMessage({ encoding: c.array(c.fixed32), onmessage (value) { seen.tokens = value } })
+  const identity = channel.addMessage({ encoding: c.raw, onmessage (value) { seen.identity.push(value) } })
+  channel.open()
+
+  const gate = identityGate(pair.server, { keyPair: HyperDHT.keyPair(), secrets: [room], context: 'peerchat' })
+  tokens.send([token(room, pair.client, 'peerchat'), ...Array.from({ length: 15 }, () => randomBytes(32))])
+  await until(() => seen.tokens, { label: 'the member\'s tokens' })
+  // It learns that the other side holds the room key, as the tokens say.
+  assert.ok(seen.tokens.some((value) => value.equals(token(room, pair.server, 'peerchat'))))
+  identity.send(Buffer.from([0]))
+
+  assert.equal(await gate, null)
+  await sleep(100)
+  // And not who it is: the member never proved.
+  assert.deepEqual(seen.identity, [])
+})
+
+test('the side that proves second proves only to a key it accepts', async (t) => {
+  const room = randomBytes(32)
+  const alice = HyperDHT.keyPair()
+  const bob = HyperDHT.keyPair()
+
+  for (const yes of [false, true]) {
+    const pair = await securePair()
+    t.after(() => pair.close())
+    const asked = []
+    // Alice opened the connection, so she proves first; Bob checks her key.
+    const [atAlice, atBob] = await Promise.all([
+      identityGate(pair.client, { keyPair: alice, secrets: [room], context: 'peerchat' }),
+      identityGate(pair.server, {
+        keyPair: bob,
+        secrets: [room],
+        context: 'peerchat',
+        async accept (publicKey, matches) {
+          asked.push({ publicKey, matches })
+          return yes
+        }
+      })
+    ])
+    assert.deepEqual(asked, [{ publicKey: alice.publicKey, matches: [0] }])
+    if (yes) {
+      assert.deepEqual(atAlice.publicKey, bob.publicKey)
+      assert.deepEqual(atBob.publicKey, alice.publicKey)
+    } else {
+      assert.equal(atAlice, null)
+      assert.equal(atBob, null)
+    }
+  }
+})
+
+// A gate token as the module makes it, written out here so that a change to
+// what goes on the wire fails a test.
+function token (secret, stream, context) {
+  const out = Buffer.alloc(32)
+  sodium.crypto_generichash_batch(out, [
+    Buffer.from('hyperdht-mdns/identity-gate/1\n'),
+    Buffer.from(context + '\n'),
+    stream.handshakeHash,
+    stream.publicKey
+  ], secret)
+  return out
+}

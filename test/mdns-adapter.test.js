@@ -138,6 +138,67 @@ test('answers a query once per asker every few seconds, after a short random del
   assert.equal(mdns.responses().length, 2)
 })
 
+test('answers stay within a cap for the whole device, however many askers there seem to be', async () => {
+  const { mdns, adapter } = setup()
+  adapter.advertise({ ...createRecord({ port: 49799 }), address: '192.168.1.20' })
+  mdns.sent.length = 0
+  // Each from another address, as anyone can make up.
+  const ask = (i) => mdns.emit('query', { questions: [{ name: SERVICE, type: 'PTR' }] }, { address: `192.168.${i >> 8}.${i & 255}`, port: 5353 })
+
+  // A hundred at once: the answer goes to the whole network, so one serves
+  // them all.
+  for (let i = 0; i < 100; i++) ask(i)
+  await wait(200)
+  assert.equal(mdns.responses().length, 1)
+
+  // A hundred more over a second or two: a few answers, then one a second.
+  const started = Date.now()
+  for (let i = 100; i < 200; i++) {
+    ask(i)
+    await wait(15)
+  }
+  await wait(200)
+  const seconds = (Date.now() - started) / 1000
+  const answers = mdns.responses().length - 1
+  assert.ok(answers >= 1 && answers <= 3 + Math.ceil(seconds), `${answers} answers in ${seconds} s`)
+})
+
+test('a query gets each record once, however many questions repeat it, and only its first questions are read', async () => {
+  const { mdns, adapter } = setup()
+  const record = createRecord({ port: 49799 })
+  adapter.advertise({ ...record, address: '192.168.1.20' })
+  mdns.sent.length = 0
+
+  const repeated = Array.from({ length: 200 }, () => ({ name: SERVICE, type: 'PTR' }))
+  mdns.emit('query', { questions: repeated }, { address: '192.168.1.40', port: 5353 })
+  await wait(200)
+  const [answer] = mdns.responses()
+  assert.deepEqual(answer.answers.map((entry) => entry.type), ['PTR', 'SRV', 'TXT', 'A'])
+
+  // A question for this device after eight others is not looked at.
+  mdns.sent.length = 0
+  const others = Array.from({ length: 8 }, (_, i) => ({ name: `other${i}._airplay._tcp.local`, type: 'PTR' }))
+  mdns.emit('query', { questions: [...others, { name: `${record.name}.local`, type: 'A' }] }, { address: '192.168.1.41', port: 5353 })
+  await wait(200)
+  assert.equal(mdns.responses().length, 0)
+})
+
+test('an answer on its way is not sent for a device that said goodbye meanwhile', async () => {
+  const { mdns, adapter } = setup()
+  // Something else still uses the adapter, so it keeps running.
+  adapter.browse({ type: 'hyperdht-mdns', protocol: 'udp' }, {})
+  const handle = adapter.advertise({ ...createRecord({ port: 49799 }), address: '192.168.1.20' })
+  mdns.sent.length = 0
+
+  mdns.emit('query', { questions: [{ name: SERVICE, type: 'PTR' }] }, { address: '192.168.1.40', port: 5353 })
+  await handle.stop()
+  await wait(200)
+  // The goodbye only, not the answer after it, which would bring it back.
+  const responses = mdns.responses()
+  assert.equal(responses.length, 1)
+  assert.ok(responses[0].answers.every((answer) => answer.ttl === 0))
+})
+
 test('does not answer someone who already has this device', async () => {
   const { mdns, adapter } = setup()
   const record = createRecord({ port: 49799 })
