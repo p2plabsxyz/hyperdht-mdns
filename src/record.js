@@ -10,10 +10,11 @@ const NAME_PATTERN = /^[a-z0-9]{16}$/
 /**
  * A device's mDNS record. It says only that a device of this kind is at this
  * address and port, under a name made up for this run: no device key and no
- * topics, so a passive listener on the network learns neither who the device
- * is nor what it is in, and cannot link it to the same device on another day
- * or another network. Topics are found through the LAN DHT, which needs the
- * topic to ask for it.
+ * topics, so a listener on mDNS learns neither who the device is nor what it
+ * is in, and cannot link it to the same device on another day or another
+ * network. Topics go on the LAN DHT instead, whose lookups and announcements
+ * carry the 32-byte topic unencrypted and, on a small network, reach every
+ * node (see ./hyperswarm-lan).
  *
  * Version 1 records carried the device's network key and a hash of every
  * joined topic. They are ignored.

@@ -9,6 +9,12 @@ const RECORD_TTL = 300
 const TARGET_ANSWERS = 32
 const ANSWER_DELAY_MIN = 20
 const ANSWER_DELAY_MAX = 120
+// Questions looked at in one query. One asking for this device takes one.
+const MAX_QUESTIONS = 8
+// Answers sent in all, whoever asks: about one a second, as mDNS asks of a
+// record (RFC 6762, section 6), with a few at once.
+const ANSWERS_PER_SECOND = 1
+const ANSWER_BURST = 4
 
 /**
  * mDNS over multicast-dns, written for this module rather than a general
@@ -24,8 +30,11 @@ const ANSWER_DELAY_MAX = 120
  *   (`liveness`);
  * - queries are answered at most once per asker every few seconds, and on a
  *   big network only by a share of the devices, so one query does not set
- *   off thousands of answers. A device asking again and again gets nothing
- *   more.
+ *   off thousands of answers. An asker's address is easy to forge, so
+ *   answers are capped for the device as a whole too, about one a second;
+ *   an answer on its way serves everyone who asks meanwhile, since it goes
+ *   to the whole network; and a query gets each record once, however many
+ *   questions it repeats.
  */
 class MDNSAdapter {
   /**
@@ -43,6 +52,8 @@ class MDNSAdapter {
     this._targetAnswers = targetAnswers || TARGET_ANSWERS
     this._random = random || Math.random
     this._answersPerAsker = new RateLimiter({ rate: 1 / 5, burst: 1 })
+    this._answers = new RateLimiter({ rate: ANSWERS_PER_SECOND, burst: ANSWER_BURST })
+    this._pendingAnswer = null
     // multicast-dns warns about every packet that does not decode, and anyone
     // on the network can send those: passed on a few at a time, so a device
     // spraying them cannot flood an app's logs.
@@ -99,6 +110,8 @@ class MDNSAdapter {
         entry.stopped = true
         clearTimeout(entry.timer)
         if (this._advertised.get(entry.fqdn) === entry) this._advertised.delete(entry.fqdn)
+        // Not answered for after its goodbye.
+        for (const record of this._records(entry, this._ttl)) this._pendingAnswer?.answers.delete(recordKey(record))
         // A goodbye: the same records with no time to live.
         await this._send(mdns, { answers: this._records(entry, 0) })
         this._release(handlers.onError)
@@ -141,8 +154,10 @@ class MDNSAdapter {
   }
 
   _handleQuery (query, rinfo) {
-    const answers = []
-    for (const question of query.questions || []) {
+    // Each record once, however many questions ask for it.
+    const answers = new Map()
+    const questions = Array.isArray(query.questions) ? query.questions.slice(0, MAX_QUESTIONS) : []
+    for (const question of questions) {
       const name = String(question.name || '').toLowerCase()
       for (const entry of this._advertised.values()) {
         if (entry.stopped) continue
@@ -150,24 +165,41 @@ class MDNSAdapter {
         if (name === entry.service && (question.type === 'PTR' || question.type === 'ANY')) {
           // Known-answer suppression: the asker already has this device.
           if (knows(query, entry, this._ttl)) continue
-          answers.push(...records)
+          for (const record of records) answers.set(recordKey(record), record)
         } else if (name === entry.fqdn || name === entry.host) {
-          answers.push(...records.filter((record) => record.name === name && matches(question.type, record.type)))
+          for (const record of records) {
+            if (record.name === name && matches(question.type, record.type)) answers.set(recordKey(record), record)
+          }
         }
       }
     }
-    if (answers.length === 0) return
+    if (answers.size === 0) return
+
+    // An answer on its way goes to the whole network, so it serves this
+    // asker too.
+    const pending = this._pendingAnswer
+    if (pending) {
+      for (const [key, record] of answers) pending.answers.set(key, record)
+      return
+    }
 
     const asker = rinfo?.address || ''
     if (!this._answersPerAsker.take(asker)) return
     // On a big network a share of the devices answers, about _targetAnswers
     // of them, which is plenty to start from.
     if (this._random() > Math.min(1, this._targetAnswers / this._population)) return
+    if (!this._answers.take('all')) return
 
     const delay = ANSWER_DELAY_MIN + this._random() * (ANSWER_DELAY_MAX - ANSWER_DELAY_MIN)
     const mdns = this._mdns
-    const timer = setTimeout(() => { if (mdns && this._mdns === mdns) this._send(mdns, { answers }) }, delay)
-    timer.unref?.()
+    const answer = { answers, timer: null }
+    answer.timer = setTimeout(() => {
+      if (this._pendingAnswer === answer) this._pendingAnswer = null
+      if (answer.answers.size === 0 || !mdns || this._mdns !== mdns) return
+      this._send(mdns, { answers: [...answer.answers.values()] })
+    }, delay)
+    answer.timer.unref?.()
+    this._pendingAnswer = answer
   }
 
   _handleResponse (response, rinfo) {
@@ -244,7 +276,10 @@ class MDNSAdapter {
       mdns.removeListener('query', this._onQuery)
       mdns.removeListener('response', this._onResponse)
       try { mdns.destroy() } catch {}
+      clearTimeout(this._pendingAnswer?.timer)
+      this._pendingAnswer = null
       this._answersPerAsker.clear()
+      this._answers.clear()
     }
   }
 }
@@ -269,6 +304,11 @@ function knows (query, entry, ttl) {
 
 function matches (asked, type) {
   return asked === 'ANY' || asked === type
+}
+
+// PTR records share a name, one per device, so the data counts too.
+function recordKey (record) {
+  return `${record.name}/${record.type}/${JSON.stringify(record.data)}`
 }
 
 function txtData (txt) {

@@ -39,6 +39,10 @@ const DEFAULT_LIMITS = {
   maxSeeds: 32,
   pingsPerSecond: 10,
   pingInterval: 30_000,
+  // A device says goodbye before its DHT has stopped, so a seed that said
+  // one is pinged this long after, to see whether it really went. Anyone
+  // can send a goodbye in its name.
+  goodbyeWait: 5000,
   // The LAN DHT.
   nodesPerIP: 4,
   requestsPerSecond: 50,
@@ -75,11 +79,14 @@ const SMALL_TABLE = 8
  * seeded by mDNS.
  *
  * What the network learns: mDNS says only that a device is at an address and
- * port, under a name made up for this run. Topics are found through the LAN
- * DHT, which needs the topic to ask for it. Connections use a key pair made up
- * for this run as well, so the device's long-term key never goes on the
- * network; who a device is can be proven inside the encrypted channel, to the
- * peers that need to know (see ./identity).
+ * port, under a name made up for this run, and carries no topics. Topics go
+ * on the LAN DHT: its lookups and announcements carry the 32-byte topic
+ * unencrypted, and on a small network they reach every node, so anyone
+ * running one sees which topics are asked for, under which per-run keys.
+ * Apps that need more can rotate their topics over time. Connections use a
+ * key pair made up for this run as well, so the device's long-term key never
+ * goes on the network; who a device is can be proven inside the encrypted
+ * channel, to the peers that need to know (see ./identity-gate).
  *
  * Scale: mDNS finds a few dozen neighbours to start from and the DHT does the
  * rest, as on the internet. Connections are capped at maxPeers in both
@@ -89,7 +96,9 @@ const SMALL_TABLE = 8
  *
  * One hostile device: every table is bounded, with a few entries per IP
  * address at most, and mDNS sightings, DHT requests, announcements, pings and
- * refreshes are rate limited.
+ * refreshes are rate limited. mDNS sightings and goodbyes are easy to forge,
+ * so a device that answered a ping keeps its place and its port until it
+ * stops answering.
  */
 class HyperDHTmDNS extends EventEmitter {
   constructor (opts = {}) {
@@ -105,6 +114,8 @@ class HyperDHTmDNS extends EventEmitter {
     this.name = randomName()
     this._hostKey = typeof opts.hostKey === 'function' ? opts.hostKey : defaultHostKey
     this._ownsSwarm = !opts.swarm
+    // Made here, so it listens on this.host and this.port only.
+    this._ownsDHT = !opts.swarm && !opts.dht
     this._destroySwarm = this._ownsSwarm && opts.destroySwarm !== false
 
     if (opts.swarm) {
@@ -543,10 +554,17 @@ class HyperDHTmDNS extends EventEmitter {
     const existing = this._devices.get(id)
     if (existing) {
       existing.lastSeen = now
-      if (existing.port !== record.port) {
+      if (existing.port === record.port) existing.nextPort = 0
+      else if (existing.reachable || existing.pinging) {
+        // Anyone can send a sighting from this address. A device that
+        // answers at its port keeps it, and the new one is tried only once
+        // that one stops answering.
+        existing.nextPort = record.port
+      } else {
+        // Its failed pings stay counted, so a sighting cannot make a device
+        // that never answered look new.
         existing.port = record.port
-        existing.reachable = false
-        existing.failures = 0
+        existing.nextPort = 0
       }
       this._seed()
       return
@@ -557,7 +575,7 @@ class HyperDHTmDNS extends EventEmitter {
       this.stats.devicesRefused++
       return
     }
-    if (this._devices.size >= this.limits.maxDevices && !this._evictStalest(now)) {
+    if (this._devices.size >= this.limits.maxDevices && !this._evictUnproven()) {
       this.stats.devicesRefused++
       return
     }
@@ -567,13 +585,17 @@ class HyperDHTmDNS extends EventEmitter {
       name: record.name,
       host,
       port: record.port,
+      // A different port seen for it, tried if this one stops answering.
+      nextPort: 0,
       hostKey,
       firstSeen: now,
       lastSeen: now,
       pingedAt: 0,
       failures: 0,
       reachable: false,
-      pinging: false
+      pinging: false,
+      // When a goodbye came for it while it answered pings, or 0.
+      goodbye: 0
     }
     this._devices.set(id, device)
     this._devicesPerHost.add(hostKey)
@@ -586,11 +608,17 @@ class HyperDHTmDNS extends EventEmitter {
     const name = String(service?.name || '').toLowerCase()
     if (!NAME_PATTERN.test(name)) return false
     // A goodbye counts only from the device's own address, so nobody can
-    // say goodbye for someone else.
+    // say goodbye for someone else from theirs.
     const sender = service.referer?.address
     for (const device of this._devices.values()) {
       if (device.name !== name) continue
       if (sender && sender !== device.host) continue
+      // The address a packet comes from is easy to forge, though. A device
+      // that answers pings is let go only once it stops answering (_sweep).
+      if (device.reachable || device.pinging) {
+        if (!device.goodbye) device.goodbye = Date.now()
+        return false
+      }
       this._removeDevice(device)
       return true
     }
@@ -604,15 +632,33 @@ class HyperDHTmDNS extends EventEmitter {
     this.adapter.setPopulation?.(this._devices.size)
   }
 
-  // A full list makes room only by dropping a device that has gone quiet.
-  _evictStalest (now) {
-    let stalest = null
+  // A full list makes room by dropping a device that has not answered a
+  // ping: one that failed to, most failures first, otherwise one not asked
+  // yet, at random from the address with the most names, so a machine that
+  // made up several goes first. Sightings are easy to forge from made-up
+  // addresses, so a device that answers is never pushed out for a newcomer.
+  _evictUnproven () {
+    let failed = null
+    let unproven = []
+    let most = 0
     for (const device of this._devices.values()) {
-      if (!stalest || device.lastSeen < stalest.lastSeen) stalest = device
+      // A ping on its way may be a newcomer about to answer.
+      if (device.reachable || device.pinging) continue
+      if (device.failures > 0) {
+        if (!failed || device.failures > failed.failures || (device.failures === failed.failures && device.lastSeen < failed.lastSeen)) failed = device
+        continue
+      }
+      const names = this._devicesPerHost.get(device.hostKey)
+      if (names > most) {
+        most = names
+        unproven = []
+      }
+      if (names === most) unproven.push(device)
     }
-    if (!stalest || now - stalest.lastSeen < this.limits.deviceTTL / 2) return false
-    this._removeDevice(stalest)
-    this.emit('peer-down', visibleDevice(stalest))
+    const victim = failed || unproven[Math.floor(Math.random() * unproven.length)]
+    if (!victim) return false
+    this._removeDevice(victim)
+    this.emit('peer-down', visibleDevice(victim))
     return true
   }
 
@@ -622,16 +668,20 @@ class HyperDHTmDNS extends EventEmitter {
   _seed () {
     if (this.destroyed || this.suspended || !this._advertising) return
     let seeds = 0
-    const candidates = []
+    const fresh = []
+    const retry = []
     const now = Date.now()
     for (const device of this._devices.values()) {
       // A ping still on its way counts, or overlapping rounds overshoot.
       if (device.reachable || device.pinging) seeds++
-      else if (now - device.pingedAt >= this.limits.pingInterval * Math.min(8, 2 ** device.failures)) candidates.push(device)
+      else if (device.pingedAt === 0) fresh.push(device)
+      else if (now - device.pingedAt >= this.limits.pingInterval * Math.min(8, 2 ** device.failures)) retry.push(device)
     }
     if (seeds >= this.limits.maxSeeds) return
 
-    for (const device of spreadByHost(shuffle(candidates))) {
+    // Devices never asked go first, so a newcomer is asked before the
+    // devices that did not answer are asked again.
+    for (const device of [...spreadByHost(shuffle(fresh)), ...spreadByHost(shuffle(retry))]) {
       if (seeds++ >= this.limits.maxSeeds) break
       if (!this._pings.take('all')) break
       this._ping(device)
@@ -639,7 +689,8 @@ class HyperDHTmDNS extends EventEmitter {
   }
 
   async _ping (device) {
-    device.pingedAt = Date.now()
+    const started = Date.now()
+    device.pingedAt = started
     device.pinging = true
     this.stats.pingsSent++
     try {
@@ -648,14 +699,32 @@ class HyperDHTmDNS extends EventEmitter {
       device.pinging = false
       device.failures++
       device.reachable = false
-      if (!this.destroyed && !this.suspended) {
-        error.message = `Could not reach discovered LAN DHT node ${device.host}:${device.port}: ${error.message}`
-        this.emit('warning', error)
+      // A ping cut short by suspend says nothing about the device.
+      if (this.destroyed || this.suspended || this._devices.get(device.id) !== device) return
+      if (device.goodbye) {
+        this._removeDevice(device)
+        this.emit('peer-down', visibleDevice(device))
+        return
+      }
+      error.message = `Could not reach discovered LAN DHT node ${device.host}:${device.port}: ${error.message}`
+      this.emit('warning', error)
+      if (device.nextPort && this._devices.get(device.id) === device) {
+        // Gone from its port, and seen at another: asked there at once,
+        // before a sweep lets it go for having gone quiet.
+        device.port = device.nextPort
+        device.nextPort = 0
+        device.failures = 0
+        device.pingedAt = 0
+        this._seed()
       }
       return
     }
     device.pinging = false
     if (this.destroyed || this._devices.get(device.id) !== device) return
+    // Still answering well after a goodbye: someone else said it. And still
+    // at its port, so another port seen for it was not its own.
+    if (started - device.goodbye >= this.limits.goodbyeWait) device.goodbye = 0
+    device.nextPort = 0
     device.failures = 0
     device.lastSeen = Date.now()
     if (!device.reachable) {
@@ -682,13 +751,22 @@ class HyperDHTmDNS extends EventEmitter {
     // out. A seed is pinged first and kept while it answers, announcing or
     // not; the rest are found again over mDNS if they are still there.
     for (const device of [...this._devices.values()]) {
-      if (now - device.lastSeen < this.limits.deviceTTL || device.pinging) continue
-      if (!device.reachable || device.failures >= 2) {
+      if (device.pinging) continue
+      const quiet = now - device.lastSeen >= this.limits.deviceTTL
+      if (quiet && (!device.reachable || device.failures >= 2)) {
         this._removeDevice(device)
         this.emit('peer-down', visibleDevice(device))
-      } else if (now - device.pingedAt >= this.limits.pingInterval && this._pings.take('all')) {
-        this._ping(device)
+        continue
       }
+      if (!device.reachable) continue
+      // A seed that said goodbye is asked once it has had time to stop. One
+      // still seen over mDNS is asked again now and then too: a sighting can
+      // be forged, an answer cannot.
+      const wait = this.limits.goodbyeWait
+      const due = device.goodbye
+        ? now - device.goodbye >= wait && device.pingedAt < device.goodbye + wait
+        : now - device.pingedAt >= (quiet ? this.limits.pingInterval : this.limits.deviceTTL)
+      if (due && this._pings.take('all')) this._ping(device)
     }
 
     // Every neighbour lost, as after the Wi-Fi was off: ask again.
@@ -804,6 +882,22 @@ class HyperDHTmDNS extends EventEmitter {
       throw error
     }
 
+    // The LAN DHT listens on this one address. While it is gone, as with the
+    // Wi-Fi off, the DHT cannot listen again, and one that failed to once
+    // never tries again: a later resume would report it back while it hears
+    // nothing. So it is checked first, and the instance stays suspended.
+    const cause = this._ownsDHT ? await bindError(this.dht.udx, this.host, this.port) : null
+    // Destroyed, or resumed by another call, meanwhile.
+    if (this.destroyed || !this.suspended) return
+    if (cause) {
+      const error = new Error(
+        `The LAN DHT cannot listen on ${this.host}:${this.port} now (${cause.code || cause.message}). It stays suspended: resume again once the address is back, or recreate the instance.`,
+        { cause }
+      )
+      error.code = 'ERR_LAN_ADDRESS_UNAVAILABLE'
+      throw error
+    }
+
     await this.swarm.resume(opts)
     this.suspended = false
     try {
@@ -818,6 +912,8 @@ class HyperDHTmDNS extends EventEmitter {
     for (const device of this._devices.values()) {
       device.pingedAt = 0
       device.failures = 0
+      device.nextPort = 0
+      device.goodbye = 0
     }
     this._seed()
   }
@@ -974,6 +1070,19 @@ function assertHandle (handle, method) {
 
 function stopHandle (handle) {
   return handle ? Promise.resolve(handle.stop()) : Promise.resolve()
+}
+
+// Why a socket cannot listen on this address and port now, or null if it can.
+async function bindError (udx, host, port) {
+  const socket = udx.createSocket()
+  try {
+    socket.bind(port, host)
+    return null
+  } catch (error) {
+    return error
+  } finally {
+    await socket.close()
+  }
 }
 
 function visibleDevice (device) {

@@ -1,4 +1,12 @@
-# hyperdht-mdns
+<p align="center">
+    <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="assets/hyperdht-mdns-dark.svg">
+        <source media="(prefers-color-scheme: light)" srcset="assets/hyperdht-mdns.svg">
+        <img src="assets/hyperdht-mdns.svg" width="120" height="120" alt="">
+    </picture>
+</p>
+
+<h1 align="center">hyperdht-mdns</h1>
 
 Private, scalable LAN peer discovery for Hyperswarm: an isolated HyperDHT on
 the local network, seeded by mDNS.
@@ -11,7 +19,7 @@ replicates over those connections as usual.
 
 Three goals shape version 2:
 
-- **The network does not tell anyone who you are or what you are in.**
+- **The network tells as little as it can about who you are and what you are in.**
 - **It works with thousands of devices on one network.**
 - **One hostile device cannot take it down.**
 
@@ -75,6 +83,9 @@ What goes out on the LAN:
   a drive on every request, so a drive in use stays on the LAN. The internet
   lookup does not change.
 
+A lookup carries its topic just as an announcement does. See
+[Privacy](#privacy) for who can see it.
+
 `sdk.swarm.flush()` is LAN first: the internet flush goes on in the
 background, so no internet does not block a local join.
 
@@ -105,23 +116,36 @@ Version 2 is built so that they learn as little as possible.
    up for this run. No device key, no topics, no machine hostname (a computer
    is often named after its owner), no other interfaces such as a VPN or
    Docker network, and no IPv6 addresses.
-2. **Topics are found through the LAN DHT,** as on the internet. Looking up a
-   topic needs the topic itself, so a passive listener cannot list who is in
-   a room or which drives a device has open. The LAN DHT talks to local
-   addresses only, so what is announced on it stays on this network.
+2. **Topics go on the LAN DHT, and its nodes see them.** Topics are announced
+   and looked up on the LAN DHT, as on the internet. Each lookup and each
+   announcement carries the 32-byte topic unencrypted to the DHT nodes it
+   asks, and on a small network that is every node, a hostile one included.
+   So anyone who runs a LAN DHT node can see which topics are asked for and
+   announced, the per-run keys and LAN addresses announced under them, and
+   who shares a topic with whom. It can also look a topic up itself. What
+   it cannot do is tell which room or drive a topic belongs to, unless it
+   already knows that topic. The LAN DHT talks to local addresses only, so
+   none of this leaves the network.
 3. **Connections use a key that changes every run.** On the internet a
    device's swarm key is often also its identity in apps (in PeerChat it is
    your id), so it would follow you from network to network. On the LAN each
    instance connects with a fresh key pair. Who you are is proven only inside
    the encrypted channel, and only to peers that share a secret with you, such
    as another member of the same room or another of your own devices (see
-   [Proving who you are](#proving-who-you-are)). This keeps people on a shared
-   network, such as a protest network, from being linked across days and
-   places.
-4. **Keep private groups on secret topics.** A topic anyone can learn, such as
-   a public room's, lets anyone who joins find its members, on the LAN as on
-   the internet. Rooms with secret keys and private sync between a person's
-   devices stay hidden.
+   [Proving who you are](#proving-who-you-are)). So the LAN key does not link
+   people on a shared network, such as a protest network, across days and
+   places. A topic that stays the same still can (see 2).
+4. **Keep private groups on secret topics, and rotate them if that
+   matters.** A topic anyone can learn, such as a public room's, lets anyone
+   who joins find its members, on the LAN as on the internet. A secret topic
+   cannot be found by someone who does not know it, but it is still seen by
+   the LAN DHT nodes it passes through, and it is the same on every network.
+   A topic that is also joined on the internet, as `attachHyperSDK` does,
+   can be looked up there by anyone who saw it on the LAN. That lookup gives
+   the long-term keys announced under it, which can then be matched to the
+   LAN addresses announcing it. An app that needs more can change its topics
+   over time, for example by making each one from the room key and the date,
+   so a topic seen today says nothing next week.
 
 Pass `keyPair` or `seed` only when you want a fixed LAN key; `lan.ephemeral`
 then reads `false`.
@@ -138,22 +162,36 @@ lan.on('connection', async (socket, info) => {
   const result = await identityGate(socket, {
     keyPair: identityKeyPair, // the long-term key pair
     secrets: [roomKey, devicesKey], // 16 to 64 bytes each
-    context: 'my-app'
+    context: 'my-app',
+    // Optional: whether to go on with this key, such as a room's member list.
+    accept: (publicKey, matches) => members.has(publicKey.toString('hex'))
   })
-  if (!result) return // nothing shared: they stay anonymous, and so do you
+  if (!result) return // nothing shared, or one side said no
   // result.publicKey is their long-term key, proven for this connection.
   // result.matches lists the indexes of the secrets you share.
 })
 ```
 
 Each side sends one token per secret, made from the secret and this
-connection, padded with random tokens to a multiple of 16 (at most 512). A
-token means nothing to someone without the secret and nothing on any other
-connection. A side proves its long-term key only after the other side showed a
-token it matched, and the proof is a signature over this connection's
-handshake hash and both connection keys, so it cannot be replayed elsewhere.
+connection, padded with random tokens to a multiple of 16. A token means
+nothing to someone without the secret and nothing on any other connection. A
+list of more than 512 tokens is not read: it closes the gate, and the
+connection is left alone.
+
+The long-term keys are proven in a fixed order. The side that opened the
+connection proves first, once it has matched one of the other side's tokens.
+The other side proves only after that proof checked out and `accept` said yes.
+So someone who holds a shared secret but declines, or whom `accept` turns
+down, learns nothing from the side that proves second. The side that proves
+first does prove itself to anyone who holds a secret it shares: keep secrets
+to the people meant to have them, and use `accept` to check who they are.
+A proof is a signature over this connection's handshake hash and both
+connection keys, so it cannot be replayed elsewhere.
+
 The gate returns `null` when nothing is shared, the other side declines or
-does not run it, or after `timeout` (15 seconds).
+does not run it, `accept` says no, or after `timeout` (15 seconds). `accept`
+gets the other side's proven key and the indexes of the matched secrets, and
+may return a promise; only `true` goes on.
 
 `createIdentityProof(keyPair, connection, context)` and
 `verifyIdentityProof(proof, connection, context)` are the proof alone, for
@@ -171,7 +209,10 @@ Nothing a device does grows with the number of devices on the network:
   again a second later, and then every 2 minutes on a jittered timer, with a
   5 minute TTL and a goodbye when it stops. Queries are answered by about 32
   devices, not all of them, at most once every 5 seconds per asker, and not
-  at all by devices the asker already lists.
+  at all by devices the asker already lists. A device answers about once a
+  second at most, whoever asks, since an asker's address is easy to forge.
+  An answer goes to the whole network, so one on its way serves everyone who
+  asks in the meantime, and it carries each record once.
 - **Connections are capped,** like the internet swarm: at most `maxPeers` (64)
   in both directions, and this device dials no one once it has
   `outgoingPeers` (40), so there is always room for a newcomer. Peers dialled
@@ -190,10 +231,10 @@ devices, 10 workers and 9 rooms, on one Mac:
 | Phase | Result |
 | --- | --- |
 | Start | every device had a routing table within 2 seconds (about 96 nodes each later on), at most 32 seeds and 256 sightings |
-| Rooms | one room of 300 and eight of 30 to 48: a message reached every member of every room (the room of 300 in 52 ms at the 95th percentile), at most 64 connections per device (45 on average) |
+| Rooms | one room of 300 and eight of 28 to 44: a message reached every member of every room (the room of 300 in 58 ms at the 95th percentile), at most 64 connections per device (44 on average) |
 | Left without a goodbye | 30 devices gone: no stale entries left anywhere, messages still reached everyone left |
-| Airplane mode | 30 devices away while messages were sent: back on new keys, all 38 missed messages caught up within 1 second |
-| One hostile machine | 60 DHT nodes on one address, thousands of made-up mDNS devices, request and announce floods: messages still reached every honest device, latecomers still joined, at most 4 hostile entries in any table |
+| Airplane mode | 30 devices away while messages were sent: back on new keys, all 42 missed messages caught up within 2 seconds |
+| One hostile machine | 60 DHT nodes on one address, thousands of made-up mDNS devices, request and announce floods, and 8160 requests with made-up tokens at one device, which answered 1548 of them, within its limit for one machine: messages still reached every honest device, latecomers still joined, at most 4 hostile entries in any table |
 
 300 devices is about what one computer can run. The per-device numbers stay
 flat as the network grows, which is what lets it go to thousands.
@@ -206,23 +247,42 @@ Every table is bounded and every source of work is rate limited:
 - **The LAN stays on the LAN.** The LAN DHT answers, adds and contacts only
   local addresses: private ranges (`10/8`, `172.16/12`, `192.168/16`) and
   link-local (`169.254/16`), or the bound address's own `/24` on a network
-  that hands out public addresses. Without this, an internet DHT node that
-  reached the LAN port through the router's UDP mapping would add it, and the
-  LAN DHT would join the internet DHT, with this network's announcements.
+  that hands out public addresses. A packet from anywhere else is dropped as
+  it arrives, and nothing is sent anywhere else: no reply, no relay or hole
+  punch that a message asks for, and no connection, whichever address a
+  peer or a relay names. Without this, an internet DHT node that reached the
+  LAN port through the router's UDP mapping would add it, and the LAN DHT
+  would join the internet DHT, with this network's announcements.
 - **Bounded tables.** At most `maxDevices` (256) mDNS sightings, at most
   `devicesPerIP` (4) device names per IP address, and at most `nodesPerIP` (4)
   routing table entries per IP address, so one machine cannot fill your view
   of the network. The LAN DHT keeps at most `records` (8192) announcements.
+- **A device that answers keeps its place.** The address an mDNS packet
+  comes from is easy to forge, so one machine can make up devices from many
+  addresses. A full list makes room by dropping a device that has not
+  answered a ping: one whose pings failed first, otherwise one not asked yet,
+  at random from the address with the most names. A device that answers is
+  never pushed out, and devices not asked yet are pinged before those that
+  failed are asked again, so a real newcomer still becomes a seed. A new port
+  seen for a device that answers is tried only once the old one stops
+  answering.
 - **Gone devices drop out.** A device not heard from for `deviceTTL` (6
   minutes) leaves the list. One that still answers pings stays, so an idle
   device keeps its place and its open connections. A goodbye counts only from
-  the device's own address, so nobody can say goodbye for someone else.
+  the device's own address, and since that can be forged too, a device that
+  answers pings is pinged again once `goodbyeWait` (5 seconds) has passed and
+  let go only if it no longer answers.
 - **Rate limits.** mDNS sightings per sender (`sightingBurst`, then
   `sightingsPerSecond`), DHT requests per sender and overall, announcements
   per sender and per sender and topic (so one machine cannot drown a topic in
-  fake peers), pings, refreshes and lookups. Connections per IP address are
-  capped at `connectionsPerIP` (4), and refused in the handshake without a
-  ban, so the same peer can come back later.
+  fake peers), pings, refreshes and lookups. DHT requests are counted as each
+  packet arrives, before the DHT reads it, so one with a made-up token counts
+  too, and delayed pings, which nothing here sends, are dropped. mDNS
+  answers are limited per asker and for the device as a whole. Connections
+  per IP address are capped at `connectionsPerIP` (4), and refused in the
+  handshake without a ban, so the same peer can come back later.
+- **Identity token lists are capped.** The identity gate reads at most 512
+  tokens; a longer list closes it unread.
 - **Silent connections are closed.** A connection that hears nothing for
   `connectionTimeout` (15 seconds), not even keepalives, is closed and its
   slot freed.
@@ -236,7 +296,8 @@ Every table is bounded and every source of work is rate limited:
 ### `const lan = new HyperDHTmDNS([options])`
 
 - `port`: the LAN DHT's fixed UDP port. Defaults to `49799`.
-- `host`: the local IPv4 address to bind and announce. By default a private,
+- `host`: the local IPv4 address to bind and announce. The LAN DHT listens on
+  this address only, not on every interface. By default a private,
   non-loopback interface is chosen.
 - `keyPair` or `seed`: a fixed LAN key. By default a new one every run.
 - `limits`: overrides for any of `HyperDHTmDNS.DEFAULT_LIMITS` (below).
@@ -248,13 +309,20 @@ Every table is bounded and every source of work is rate limited:
   address by default.
 - `allowLoopback`: allow `127.0.0.1`, for tests.
 - `dhtOptions` and `swarmOptions`: passed to HyperDHT and Hyperswarm.
+  `dhtOptions.udx` is ignored: the LAN DHT has a UDX of its own, so its
+  checks on local addresses touch no other DHT's sockets.
 - `swarm` and `dht`: bring your own. The instance then leaves connections it
-  did not make alone and does not apply the connection caps.
+  did not make alone and does not apply the connection caps. A DHT you bring,
+  or the one in a swarm you bring, gets none of the LAN DHT's checks either:
+  not the local-only rule, the rate limits or the per-IP limits.
 
 An owned DHT is bound to one address. After the device moves to another
 network, destroy the instance and create a new one. When the instance chose
 the address itself and it has changed, `resume()` throws
-`ERR_LAN_INTERFACE_CHANGED`.
+`ERR_LAN_INTERFACE_CHANGED`. When the DHT cannot listen on its address and
+port again, as while the Wi-Fi is off, `resume()` throws
+`ERR_LAN_ADDRESS_UNAVAILABLE` and the instance stays suspended: resume again
+once the address is back, or create a new instance.
 
 ### Methods
 
@@ -281,7 +349,8 @@ name), `dht`, `swarm`, `connections`, `peers`, `limits`, `stats`.
   `ephemeral: true`.
 - `peer ({ name, host, port })`: a device seen over mDNS.
 - `peer-reachable ({ name, host, port })`: it answered a ping and seeds the DHT.
-- `peer-down ({ name, ... })`: it said goodbye or went quiet.
+- `peer-down ({ name, ... })`: it said goodbye or went quiet. A device that
+  answered pings is let go only once it stops answering.
 - `warning (error)`, `error (error)`, `ready`, `update`, `close`.
 
 ### Limits
@@ -299,6 +368,7 @@ name), `dht`, `swarm`, `connections`, `peers`, `limits`, `stats`.
 | `sightingsPerSecond`, `sightingBurst` | 0.5, 16 | mDNS sightings per sender |
 | `maxSeeds` | 32 | devices pinged into the routing table |
 | `pingsPerSecond`, `pingInterval` | 10, 30 s | pings, and the wait before pinging a device again |
+| `goodbyeWait` | 5 s | wait before a device that answered pings and said goodbye is pinged to check |
 | `nodesPerIP` | 4 | routing table entries from one IP address |
 | `requestsPerSecond`, `requestBurst` | 50, 200 | DHT requests per sender |
 | `requestsPerSecondTotal` | 2000 | DHT requests overall |
@@ -397,9 +467,11 @@ npm run test:stress -- --devices 300 --workers 10
 
 The integration tests cover devices on the LAN that move to the internet and
 back, airplane mode cycles with new keys, catching up on missed data, a
-hostile machine, and floods. `test:mdns` also checks what went out over
-multicast: a random name, the port, the address and `v=2`, nothing more, and
-that the routing tables hold local nodes only.
+hostile machine, floods (made-up tokens and forged mDNS addresses too), and
+that nothing reaches the LAN DHT from outside the local network or goes out
+to it. `test:mdns` also checks what went out over multicast: a random name,
+the port, the address and `v=2`, nothing more, and that the routing tables
+hold local nodes only.
 `docker compose up` starts four containers on the host network that must all
 find each other, and `.github/workflows/benchmark-ci.yml` measures throughput
 and latency with `test/benchmark.js`.

@@ -156,7 +156,7 @@ Run this command on three computers on the same LAN with the same --room.
 Options:
   --name <name>  Name shown to the other test nodes
   --room <room>  Shared test room (default: hyperdht-mdns-test)
-  --host <ip>    LAN IPv4 address to advertise (auto-selected by default)
+  --host <ip>    LAN IPv4 address to listen on and advertise (auto-selected by default)
   --port <port>  Fixed HyperDHT UDP port (default: 49799)
   -h, --help     Show this help`)
 }

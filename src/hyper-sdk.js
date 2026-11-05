@@ -21,7 +21,9 @@ const CORE_TOPIC_TTL = 10 * 60_000
  * What is announced: topics joined with sdk.join, such as rooms and private
  * sync, as asked. Drives this device writes, as asked. Drives opened only to
  * read are looked up, not announced, and left on the LAN once they have not
- * been opened for coreTopicTTL; opening one again looks for it again.
+ * been opened for coreTopicTTL; opening one again looks for it again. A
+ * lookup shows its topic to the LAN DHT nodes it asks, as an announcement
+ * does (see ./hyperswarm-lan).
  */
 async function attachHyperSDK (sdk, opts = {}) {
   assertSDK(sdk)
